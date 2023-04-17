@@ -1,8 +1,131 @@
 import collections
 import numpy as np
 
-from lux.utils_raoul import chebyshev_distance_points, chebyshev_dist_vect_point, nearest_factory_tile, \
-    custom_dist_vect_point, custom_dist_points, manhattan_dist_points
+from lux.utils_raoul import chebyshev_dist_points, chebyshev_dist_vect_point, nearest_factory_tile, \
+    manh_dist_to_factory_vect_point, manh_dist_to_factory_points, manhattan_dist_points, custom_dist_points, \
+    custom_dist_vect_point
+
+
+def get_ideal_assignment_queue_new(factory, game_state, assigned_resources):
+    """
+    Ideally, should be function of the turn and the position of the factory...
+    Will be improved over time?
+
+    :return: ordered list of assignments
+    """
+
+    ice_tiles = np.array(assigned_resources["ice"][factory.unit_id])
+    ore_tiles = np.array(assigned_resources["ore"][factory.unit_id])
+
+    # sorted_ice_distances = sorted(custom_dist_vect_point(ice_tiles, factory.pos)) if len(ice_tiles) else []
+    sorted_ice_distances = sorted(manh_dist_to_factory_vect_point(ice_tiles, factory.pos)) if len(ice_tiles) else []
+    sorted_ore_distances = sorted(manh_dist_to_factory_vect_point(ore_tiles, factory.pos)) if len(ore_tiles) else []
+    sorted_ice_tiles = sorted(ice_tiles, key=lambda t: manh_dist_to_factory_points(t, factory.pos))
+    sorted_ore_tiles = sorted(ore_tiles, key=lambda t: manh_dist_to_factory_points(t, factory.pos))
+
+    queue = list()
+
+    n_exploited_ore, n_exploited_ice, n_diggers, n_fighters = 0, 0, 0, 0
+    n_adjacent_ice = sum([d == 1 for d in sorted_ice_distances])
+    n_adjacent_ore = sum([d == 1 for d in sorted_ore_distances])
+
+    n_exploited_ore = 10
+
+    # todo: expend information available: nb of units AND factory details (water available)
+
+    max_distance_to_exploit = 10
+
+    if game_state.real_env_steps < 100:
+        # go for ore first
+        if n_adjacent_ore > n_exploited_ore:
+            n_exploited_ore += 1
+            queue.extend([f"ore_duo_main_{n_exploited_ore}", f"ore_duo_assist_{n_exploited_ore}"])
+        elif len(sorted_ore_distances) > n_exploited_ore \
+                and sorted_ore_distances[n_exploited_ore] < max_distance_to_exploit:
+            n_exploited_ore += 1
+            queue.extend([f"ore_solo_{n_exploited_ore}"])
+
+        # then water
+        if n_adjacent_ice > n_exploited_ice:
+            n_exploited_ice += 1
+            queue.extend([f"water_duo_main_{n_exploited_ice}", f"water_duo_assist_{n_exploited_ice}"])
+        elif len(sorted_ice_distances) > n_exploited_ice \
+                and sorted_ice_distances[n_exploited_ice] < max_distance_to_exploit:
+            n_exploited_ice += 1
+            queue.extend([f"water_solo_{n_exploited_ice}"])
+
+    else:  # mid game
+        # water first
+        if n_adjacent_ice > n_exploited_ice:
+            n_exploited_ice += 1
+            queue.extend([f"water_duo_main_{n_exploited_ice}", f"water_duo_assist_{n_exploited_ice}"])
+        elif len(sorted_ice_distances) > n_exploited_ice \
+                and sorted_ice_distances[n_exploited_ice] < max_distance_to_exploit:
+            n_exploited_ice += 1
+            queue.extend([f"water_solo_{n_exploited_ice}"])
+        # then ore
+        if n_adjacent_ore > n_exploited_ore:
+            n_exploited_ore += 1
+            queue.extend([f"ore_duo_main_{n_exploited_ore}", f"ore_duo_assist_{n_exploited_ore}"])
+        elif len(sorted_ore_distances) > n_exploited_ore \
+                and sorted_ore_distances[n_exploited_ore] < max_distance_to_exploit:
+            n_exploited_ore += 1
+            queue.extend([f"ore_solo_{n_exploited_ore}"])
+
+    for i in range(2):  # then ore again x2
+        if n_adjacent_ore > n_exploited_ore:
+            n_exploited_ore += 1
+            queue.extend([f"ore_duo_main_{n_exploited_ore}", f"ore_duo_assist_{n_exploited_ore}"])
+        elif len(sorted_ore_distances) > n_exploited_ore and \
+                sorted_ore_distances[n_exploited_ore] < max_distance_to_exploit:
+            n_exploited_ore += 1
+            queue.extend([f"ore_solo_{n_exploited_ore}"])
+
+    for i in range(2):  # then digs x2
+        n_diggers += 1
+        queue.extend([f"dig_rubble_{n_diggers}"])
+
+    # then one more water
+    if n_adjacent_ice > n_exploited_ice:
+        n_exploited_ice += 1
+        queue.extend([f"water_duo_main_{n_exploited_ice}", f"water_duo_assist_{n_exploited_ice}"])
+    elif len(sorted_ice_distances) > n_exploited_ice and \
+            sorted_ice_distances[n_exploited_ice] < max_distance_to_exploit:
+        n_exploited_ice += 1
+        queue.extend([f"water_solo_{n_exploited_ice}"])
+
+    for i in range(2):  # then digs x2
+        n_diggers += 1
+        queue.extend([f"dig_rubble_{n_diggers}"])
+
+    for i in range(10):  # then fight x10
+        n_fighters += 1
+        queue.extend([f"fight_{n_fighters}"])
+
+    asngmt_tile_map = assign_tiles(factory, queue, sorted_ice_tiles, sorted_ore_tiles)
+    # check we did the tiles mapping correctly
+    assert all([asgnmt in asngmt_tile_map.keys() for asgnmt in queue])
+
+    return queue, asngmt_tile_map
+
+
+def assign_tiles(factory, queue, sorted_ice_tiles, sorted_ore_tiles):
+    asngmt_tile_map = dict()
+    for asgnmt in queue:
+        if "water_" in asgnmt and "_assist_" not in asgnmt:
+            resource, n_allocated = asgnmt.split('_')[0], int(asgnmt.split('_')[-1])
+            asngmt_tile_map[asgnmt] = sorted_ice_tiles[n_allocated-1]
+        elif "ore_" in asgnmt and "_assist_" not in asgnmt:
+            resource, n_allocated = asgnmt.split('_')[0], int(asgnmt.split('_')[-1])
+            asngmt_tile_map[asgnmt] = sorted_ore_tiles[n_allocated-1]
+        elif "_assist_" in asgnmt:
+            resource, n_allocated = asgnmt.split('_')[0], int(asgnmt.split('_')[-1])
+            near_factory_tile_from_dig_spot = nearest_factory_tile(sorted_ice_tiles[n_allocated-1], factory.pos)
+            asngmt_tile_map[asgnmt] = near_factory_tile_from_dig_spot
+        else:
+            asngmt_tile_map[asgnmt] = None
+
+    return asngmt_tile_map
 
 
 def get_ideal_assignment_queue(factory, game_state, assigned_resources):
@@ -138,7 +261,96 @@ def get_ideal_assignment_queue(factory, game_state, assigned_resources):
     return queue, asngmt_tile_map
 
 
-def update_assignments(current_factory_assignments, ideal_queue, units, heavy_reassign=True):
+def update_assignments_new(factory, factory_units, cur_units_assignments, ideal_queue, heavy_reassign=True, game_state=None):
+    """
+    look at current assignments, ideal_assignments_queue and reorganise assignments such as it is fit-for-purpose.
+
+    :return: {u_id: reassignment} (only for u_id that have been updated)
+    """
+
+    # below useless if we're careful in arg we pass
+    cur_units_assignments = {u_id: asgnmt for u_id, asgnmt in cur_units_assignments.items()
+                             if u_id in factory_units.keys()}
+
+
+    # redefine units as only the currently assigned ones...
+    # the other ones will be assigned later or are assumed to be assigned already... not great
+    # factory_units = {u_id: unit for u_id, unit in factory_units.items() if u_id in cur_factory_assignments.keys()}
+
+    # # assumes no unassigned units... could be improved for that
+    # assert (not len(units)) or all([u_id in current_factory_assignments.keys() for u_id in units.keys()])
+    # assert all([u_id in cur_factory_assignments.keys() for u_id in factory_units.keys()])
+    # unassigned_units_d = {u_id: u for u_id, u in units.items() if u_id not in current_factory_assignments.keys()}
+
+    nb_units = len(factory_units)
+    nb_heavy = len([u_id for u_id, unit in factory_units.items() if unit.unit_type == "HEAVY"])
+    unassigned_units = [u_id for u_id in factory_units.keys() if u_id not in cur_units_assignments.keys()]
+
+    # define sorted_u_id that contains all unit_ids sorted by reassignment priority
+    priorities_d = {u_id: ideal_queue.index(asgnmt) for u_id, asgnmt in cur_units_assignments.items()}
+    u_id_by_desc_priority = sorted(list(priorities_d.keys()), key=lambda u_id: -priorities_d[u_id])
+    sorted_u_id = unassigned_units + u_id_by_desc_priority
+
+    if game_state is not None and game_state.real_env_steps > 100 and factory.unit_id == "factory_1":
+        pass
+
+    # implem check, to be removed once confident
+    assert all([u_id in factory_units.keys() for u_id in sorted_u_id]) and \
+           all([u_id in sorted_u_id for u_id in factory_units.keys()])
+
+    reassignments_d = dict()
+    if heavy_reassign:
+        i = 0
+        for asgnmt in ideal_queue:
+            if "_assist_" in asgnmt:
+                continue
+
+            i += 1
+            if i > nb_heavy:
+                break
+
+            try:
+                currently_assigned_u_id = [u_id for u_id, asgnmt_ in cur_units_assignments.items()
+                                           if asgnmt_ == asgnmt][0]
+                assigned_unit_type = factory_units[currently_assigned_u_id].unit_type
+                if assigned_unit_type == "HEAVY":
+                    continue
+                # put to the least attractive task for now, will be reassigned properly later on
+                # current_factory_assignments[currently_assigned_u_id] = ideal_queue[-1]
+                # reassignments_d[currently_assigned_u_id] = ideal_queue[-1]
+
+                sorted_u_id.remove(currently_assigned_u_id)  # remove from wherever it is
+                sorted_u_id.insert(0, currently_assigned_u_id)  # put on left side (to be reassigned asap)
+
+            except IndexError:
+                # no currently_assigned_u_id to that task, let's take one
+                pass
+
+            to_be_reassigned_id = [u_id for u_id in sorted_u_id if factory_units[u_id].unit_type == "HEAVY"][0]
+            reassignments_d[to_be_reassigned_id] = asgnmt
+            sorted_u_id.remove(to_be_reassigned_id)  # remove from left side
+            sorted_u_id.append(to_be_reassigned_id)  # put on right side  (not to be reassigned)
+
+    i = 0
+    for asgnmt in ideal_queue:
+        i += 1
+        if i > nb_units:
+            break
+        if asgnmt not in dict(cur_units_assignments, **reassignments_d).values():
+            # reassign unit with the smallest priority to something more important
+            to_be_reassigned_id = sorted_u_id[0]
+            reassignments_d[to_be_reassigned_id] = asgnmt
+            sorted_u_id.remove(to_be_reassigned_id)  # remove from left side
+            sorted_u_id.append(to_be_reassigned_id)  # put on right side  (not to be reassigned)
+
+    # implem check, to be removed once confident
+    assert all([u_id in factory_units.keys() for u_id in sorted_u_id]) and \
+           all([u_id in sorted_u_id for u_id in factory_units.keys()])
+
+    return reassignments_d
+
+
+def update_assignments_old(current_factory_assignments, ideal_queue, units, heavy_reassign=True):
     """
     look at current assignments, ideal_assignments_queue and reorganise assignments such as it is fit-for-purpose.
 
@@ -260,13 +472,15 @@ def assign_factories_resource_tiles(factories, game_state):
     factory_ids = list(factories.keys())
 
     map_factory_tiles = {"ice": collections.defaultdict(list), "ore": collections.defaultdict(list)}
-    for ice_tile in ice_tile_locations:
-        factory_distances = chebyshev_dist_vect_point(factory_tiles, ice_tile)
+    for tile in ice_tile_locations:
+        # factory_distances = chebyshev_dist_vect_point(factory_tiles, tile)
+        factory_distances = manh_dist_to_factory_vect_point(factory_tiles, tile)
         near_factory_i = np.argmin(factory_distances)
-        map_factory_tiles["ice"][factory_ids[near_factory_i]].append((ice_tile[0], ice_tile[1]))
-    for ice_tile in ore_tile_locations:
-        factory_distances = chebyshev_dist_vect_point(factory_tiles, ice_tile)
+        map_factory_tiles["ice"][factory_ids[near_factory_i]].append((tile[0], tile[1]))
+    for tile in ore_tile_locations:
+        # factory_distances = chebyshev_dist_vect_point(factory_tiles, tile)
+        factory_distances = manh_dist_to_factory_vect_point(factory_tiles, tile)
         near_factory_i = np.argmin(factory_distances)
-        map_factory_tiles["ore"][factory_ids[near_factory_i]].append((ice_tile[0], ice_tile[1]))
+        map_factory_tiles["ore"][factory_ids[near_factory_i]].append((tile[0], tile[1]))
 
     return map_factory_tiles

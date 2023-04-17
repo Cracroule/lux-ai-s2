@@ -32,7 +32,7 @@ def chebyshev_dist_vect_point(loc1, loc2):
     return np.max(np.abs(loc2 - loc1), 1)
 
 
-def chebyshev_distance_points(loc1, loc2):
+def chebyshev_dist_points(loc1, loc2):
     return np.max(np.abs(loc2 - loc1))
 
 
@@ -41,7 +41,15 @@ def custom_dist_vect_point(loc1, loc2):
 
 
 def custom_dist_points(loc1, loc2):
-    return np.floor((manhattan_dist_points(loc1, loc2) + chebyshev_distance_points(loc1, loc2)) / 2).astype(int)
+    return np.floor((manhattan_dist_points(loc1, loc2) + chebyshev_dist_points(loc1, loc2)) / 2).astype(int)
+
+
+def manh_dist_to_factory_vect_point(loc1, loc2):
+    return np.sum(np.maximum(np.abs(loc2 - loc1) - 1, 0), 1)
+
+
+def manh_dist_to_factory_points(loc1, loc2):
+    return np.sum(np.maximum(np.abs(loc2 - loc1) - 1, 0))
 
 
 # direction (0 = center, 1 = up, 2 = right, 3 = down, 4 = left)
@@ -230,6 +238,15 @@ def is_unit_safe(my_unit, their_unit):
     return my_unit.unit_type == "HEAVY" and their_unit.unit_type == "LIGHT"
 
 
+def get_pos_power_cargo(unit, unit_pos=None, unit_power=None, unit_cargo=None):
+    """
+    util function to initialise in one line the unit_pos, unit_power and unit_cargo (useful for forward projections)
+    :return: unit_pos, unit_power, unit_cargo
+    """
+    unit_pos = unit.pos if unit_pos is None else unit_pos
+    unit_power = unit.power if unit_power is None else unit_power
+    unit_cargo = unit.cargo if unit_cargo is None else unit_cargo
+    return unit_pos, unit_power, unit_cargo
 
 # make trivial itinerary between unit and target pos
 # favors clock-wise movements, i,e, prioritise up > right > down > left
