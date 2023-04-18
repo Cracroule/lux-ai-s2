@@ -136,7 +136,7 @@ def weighted_rubble_adjacent_density(rubble_board, loc, max_d=7):
 # todo: could be done better, i.e. favoring adjacent areas nearby existing lichen or already dug tiles
 # todo: also could optimise perfs doing a base scoring only once per turn per factory, and adding the
 #       proximity penalty when sorting positions (in the key arg).
-def score_rubble_tiles_to_dig(game_state, associated_factory, obs_n=10):
+def score_rubble_tiles_to_dig(game_state, associated_factory, obs_n=10, distance_penalty_factor=30):
 
     # if include_proximity_penalty and unit_pos is None:
     #     raise NotImplementedError("Error in score_rubble_tiles_to_dig: if include_proximity_penalty "
@@ -157,7 +157,7 @@ def score_rubble_tiles_to_dig(game_state, associated_factory, obs_n=10):
         if not rubble:
             continue
 
-        tile_score = 100 * min(abs(dx - 1), 0) + min(abs(dy - 1), 0) + rubble
+        tile_score = distance_penalty_factor * (min(abs(dx - 1), 0) + min(abs(dy - 1), 0)) + rubble
         tiles_scores[(x, y)] = tile_score
 
     # if include_proximity_penalty:
@@ -167,7 +167,7 @@ def score_rubble_tiles_to_dig(game_state, associated_factory, obs_n=10):
     return tiles_scores
 
 
-def score_rubble_add_proximity_penalty_to_tiles_to_dig(tiles_scores, unit_pos, proximity_penalty_factor=10):
+def score_rubble_add_proximity_penalty_to_tiles_to_dig(tiles_scores, unit_pos, proximity_penalty_factor=7):
     return {t: score + proximity_penalty_factor * (abs(unit_pos[0] - t[0]) + abs(unit_pos[1] - t[1]))
             for t, score in tiles_scores.items()}
 
@@ -246,6 +246,8 @@ def get_pos_power_cargo(unit, unit_pos=None, unit_power=None, unit_cargo=None):
     unit_pos = unit.pos if unit_pos is None else unit_pos
     unit_power = unit.power if unit_power is None else unit_power
     unit_cargo = unit.cargo if unit_cargo is None else unit_cargo
+    # if unit_cargo is None:
+    #     unit_cargo = [(unit.cargo.ice, 0), (unit.cargo.ore, 1), (unit.cargo.water, 2), (unit.cargo.metal, 3)]
     return unit_pos, unit_power, unit_cargo
 
 # make trivial itinerary between unit and target pos

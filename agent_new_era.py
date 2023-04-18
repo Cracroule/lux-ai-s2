@@ -10,8 +10,18 @@ from lux.utils_raoul import manhattan_dist_vect_point, manhattan_dist_points, ch
     chebyshev_dist_vect_point, weighted_rubble_adjacent_density, score_rubble_tiles_to_dig, water_cost_to_end, \
     assess_units_main_threat, is_unit_stronger, is_unit_safe, is_registry_free
 from agent_tricks import assist_adj_digging, go_adj_dig, go_to_factory, go_dig_resource, go_dig_rubble, go_fight
-from assignments import update_assignments_old, give_assignment, get_ideal_assignment_queue, \
-    assign_factories_resource_tiles, update_assignments_new, get_ideal_assignment_queue_new
+from assignments import give_assignment, decide_factory_regime, assign_factories_resource_tiles, \
+    update_assignments, get_ideal_assignment_queue
+
+
+# debug purposes
+monitored_units = ["unit_48"]
+# monitored_turns = [436]
+# monitored_turns = list(range(350, 360))
+monitored_turns = [360]
+# time_monitored_turns = [162, 164]
+# time_monitored_turns = [875, ]
+time_monitored_turns = []
 
 
 class Agent:
@@ -34,6 +44,7 @@ class Agent:
         self.rubble_tiles_being_dug = dict()  # u_id: tuple(tile)
         self.position_registry = dict()  # (turn, (x, y)): u_id
         self.fighting_units = list()  # list of fighting u_id  (remembered to de assign tasks if no more fighting)
+        self.factory_regimes = dict()  # f_id: ["high_level_priorities"]
 
     def early_setup(self, step: int, obs, remainingOverageTime: int = 60):
         """
@@ -137,56 +148,18 @@ class Agent:
         forward_game_states = [obs_to_game_state(step + i, self.env_cfg, f_obs) for i, f_obs in enumerate(forward_obs)]
         """
 
-        factories_power = dict()  # round state variable to keep track of power expenses
-
         game_state = obs_to_game_state(step, self.env_cfg, obs)
-        factories = game_state.factories[self.player]
-        units = game_state.units[self.player]
-        # game_state.teams[self.player].place_first
-        factory_tiles, factory_units = [], []
+        factories, units = game_state.factories[self.player], game_state.units[self.player]
+        factory_tiles = np.array([f.pos for f_id, f in factories.items()])
+        all_factories = [f for f_id, f in factories.items()]
+        factories_power = {f_id: f.power for f_id, f in factories.items()}
         op_player = "player_1" if self.player == "player_0" else "player_0"
         main_threats = assess_units_main_threat(units, game_state.units[op_player])
-
-        overall_time_monitored_turns = []
-        if game_state.env_steps in overall_time_monitored_turns:
-            start_time = time.time()
-
-        for unit_id, factory in factories.items():
-
-            # prepare variables
-            factory_tiles += [factory.pos]
-            factory_units += [factory]
-            factories_power[unit_id] = factory.power
-
-            if factory.power >= self.env_cfg.ROBOTS["HEAVY"].POWER_COST and \
-                    factory.cargo.metal >= self.env_cfg.ROBOTS["HEAVY"].METAL_COST and \
-                    (game_state.real_env_steps == 0):
-                actions[unit_id] = factory.build_heavy()
-
-            # todo: unit creation that makes sense
-            if factory.power >= self.env_cfg.ROBOTS["LIGHT"].POWER_COST and \
-                    factory.cargo.metal >= self.env_cfg.ROBOTS["LIGHT"].METAL_COST and \
-                    (game_state.real_env_steps in (1, 2, 3, 4, 5)):
-                actions[unit_id] = factory.build_light()
-
-            current_water_cost = max(factory.water_cost(game_state), 1)
-            projected_total_cost = water_cost_to_end(current_water_cost, 1000 - game_state.real_env_steps,
-                                                     increase_rate=0.015) + 10
-            if factory.can_water(game_state) and factory.cargo.water > projected_total_cost and \
-                    game_state.real_env_steps > 500:
-                actions[unit_id] = factory.water()
-            elif factory.can_water(game_state) and factory.cargo.water > 160 and (
-                    (step % 2) == 0 or (step % 11) == 0):
-                actions[unit_id] = factory.water()  # attempt to get a bit more power for cheap
-        factory_tiles = np.array(factory_tiles)
+        cur_turn = game_state.real_env_steps
 
         #################################################################################
         #               ASSIGNMENT HANDLING
         #################################################################################
-        # time_monitored_turns = [162, 164]
-        # time_monitored_turns = [875, ]
-        time_monitored_turns = []
-
         # update persistent state in case of death of units or factories
         self.robots_assignments = {u_id: asgnmt for u_id, asgnmt in self.robots_assignments.items()
                                    if u_id in units.keys()}
@@ -199,24 +172,22 @@ class Agent:
             actions[u_id] = list()  # free to do whatever now (registry cleaned just below)
         self.fighting_units = list()  # will be reassessed dynamically below...
         self.position_registry = {(turn, (x, y)): u_id for (turn, (x, y)), u_id in self.position_registry.items()
-                                  if u_id in units.keys() and turn >= game_state.real_env_steps
-                                  and u_id not in not_fighting_anymore}
+                                  if u_id in units.keys() and turn >= cur_turn and u_id not in not_fighting_anymore}
 
         if game_state.env_steps in time_monitored_turns:
             start_time = time.time()
 
+        # todo: rewrite with: for k in list(keys()) { (...) del d[k] } will reduce cost to n from n^2
         for (turn, (x, y)), unit_id in self.position_registry.items():
-            if turn == game_state.real_env_steps and tuple(units[unit_id].pos) != (x, y):
+            if turn == cur_turn and tuple(units[unit_id].pos) != (x, y):
+
+                if unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
+                    pass
+
                 # print("lost unit: ", unit_id, "    on turn:", game_state.real_env_steps)
                 # reset the unit, as something happened leading to the unit not to be where it should (power issue?)
                 self.position_registry = {key: u_id for key, u_id in self.position_registry.items() if u_id != unit_id}
                 actions[unit_id] = list()
-
-        if game_state.env_steps in time_monitored_turns:
-            end_time = time.time()
-            local_time = str(end_time-start_time)
-            pass
-            start_time = time.time()
 
         # initialise dictionary that keeps track of good tiles to dig around factories
         # rubble_tiles_scores_per_factory = dict()  # todo: could be used as a cache for a given round to save time
@@ -226,39 +197,17 @@ class Agent:
                 any([f_id not in factories.keys() for f_id in self.factory_resources_map]):
             self.factory_resources_map = assign_factories_resource_tiles(factories, game_state)
 
-        # ensure all units have a factory and an assignment
+        # ensure all units have an assigned factory
         for unit_id, unit in units.items():
-
             if unit_id in self.robots_assignments.keys() and unit_id in self.map_unit_factory.keys() and \
                     self.map_unit_factory[unit_id] in factories.keys():
                 continue  # nothing to do, all in order
-
             factory_distances = manhattan_dist_vect_point(factory_tiles, unit.pos)
             near_factory_i = np.argmin(factory_distances)  # todo: crash if no factories. not a big deal? (lost anyway)
-
             if unit_id not in self.map_unit_factory.keys() or self.map_unit_factory[unit_id] not in factories.keys():
-                self.map_unit_factory[unit_id] = factory_units[near_factory_i].unit_id  # assign factory to unit
+                self.map_unit_factory[unit_id] = all_factories[near_factory_i].unit_id  # assign factory to unit
                 if unit_id in self.robots_assignments.keys():
                     del self.robots_assignments[unit_id]  # new factory associated, let's remove assignment
-
-            # if unit_id not in self.robots_assignments.keys():
-            #     assigned_factory = factories[self.map_unit_factory[unit_id]]
-                # ideal_queue, _ = get_ideal_assignment_queue(assigned_factory, game_state,
-                #                                             assigned_resources=self.factory_resources_map)
-                # assignment = give_assignment(unit, game_state, self.robots_assignments, self.map_unit_factory,
-                #                              assigned_resources=self.factory_resources_map,
-                #                              ideal_queue=ideal_queue, assigned_factory=factory_units[near_factory_i])
-                # self.robots_assignments[unit_id] = assignment
-                # self.map_unit_factory[unit_id] = factory_units[near_factory_i].unit_id
-
-        if game_state.env_steps in time_monitored_turns:
-            end_time = time.time()
-            local_time = str(end_time-start_time)
-            pass
-            start_time = time.time()
-
-        # these tiles will be avoided by solo resource diggers and rubble diggers
-        assistant_tiles = list()  # list of tiles pre-booked for assistants
 
         # review and reorganise assignments if necessary (includes death of factories)
         assignment_tile_map_per_factory, ideal_queue_per_factory = dict(), dict()
@@ -267,31 +216,25 @@ class Agent:
             factory_units = {u_id: u for u_id, u in units.items()
                              if u_id in self.map_unit_factory.keys() and self.map_unit_factory[u_id] == factory_id}
             fact_units_assignments = {u_id: asgnmt for u_id, asgnmt in self.robots_assignments.items()
-                                   if u_id in factory_units.keys()}
-            # get_ideal_assignment_queue(agent, factory, game_state, assigned_resources
+                                      if u_id in factory_units.keys()}
+            if (cur_turn % 30) == 0 or not len(self.factory_regimes):
+                self.factory_regimes[factory_id] = decide_factory_regime(factory, game_state, factory_units,
+                                                                         self.factory_resources_map)
             ideal_queue_per_factory[factory_id], assignment_tile_map_per_factory[factory_id] = \
-                get_ideal_assignment_queue_new(factory, game_state, self.factory_resources_map)
-
-            updated_assignments_d = update_assignments_new(factory, factory_units, fact_units_assignments,
-                                                           ideal_queue_per_factory[factory_id], heavy_reassign=True, game_state=game_state)
-            # updated_assignments_d = update_assignments_old(fact_units_assignments, ideal_queue_per_factory[factory_id],
-            #                                                units, heavy_reassign=True)
-            # # TODO: think if cache / actions update necessary here...
+                get_ideal_assignment_queue(factory, game_state, self.factory_resources_map,
+                                           self.factory_regimes[factory_id])
+            # if cur_turn == 101 and factory_id == "factory_5":
+            #     pass
+            updated_assignments_d = update_assignments(factory, factory_units, fact_units_assignments,
+                                                       ideal_queue_per_factory[factory_id], heavy_reassign=True)
             # delete future actions and positions so it's recomputed
             for (unit_id, updated_asgnmt) in updated_assignments_d.items():
+                if unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
+                    pass
                 actions[unit_id] = list()
             self.position_registry = {key: u_id for key, u_id in self.position_registry.items()
                                       if u_id not in updated_assignments_d.keys()}
             self.robots_assignments.update(updated_assignments_d)
-            # todo: remove all this concept of assistant tiles... (handled through position registry now)
-            # assistant_tiles.extend([tile for asgnmt, tile in assignment_tile_map_per_factory[factory_id].items()
-            #                         if "assist" in asgnmt])
-
-        if game_state.env_steps in time_monitored_turns:
-            end_time = time.time()
-            local_time = str(end_time-start_time)
-            pass
-            start_time = time.time()
 
         # once all assignments have been done / redone, update rubble cache
         # delete entry if unit died or if not digging anymore
@@ -306,16 +249,36 @@ class Agent:
             start_time = time.time()
 
         #################################################################################
+        #               FACTORIES CREATE UNITS ?
+        #################################################################################
+        for f_id, factory in factories.items():
+            if is_registry_free(cur_turn + 1, factory.pos, self.position_registry, factory.unit_id):
+                if factory.power >= self.env_cfg.ROBOTS["HEAVY"].POWER_COST and \
+                        factory.cargo.metal >= self.env_cfg.ROBOTS["HEAVY"].METAL_COST:
+                    # if cur_turn == 0:
+                    actions[f_id] = factory.build_heavy()
+                    self.position_registry[(cur_turn + 1, tuple(factory.pos))] = factory.unit_id
+
+                # unit creation
+                elif factory.power >= self.env_cfg.ROBOTS["LIGHT"].POWER_COST and \
+                        factory.cargo.metal >= self.env_cfg.ROBOTS["LIGHT"].METAL_COST:
+
+                    # build a light unit only if there is not a unit currently digging ore (else we prefer HEAVY)
+                    f_units = {u_id: u for u_id, u in units.items() if u_id in self.map_unit_factory.keys()
+                               and self.map_unit_factory[u_id] == f_id}
+                    f_units_assignments = {u_id: asgnmt for u_id, asgnmt in self.robots_assignments.items()
+                                           if u_id in f_units.keys()}
+                    # nb_heavy = sum([u.unit_type == "HEAVY" for u in f_units.values()])
+                    # ore_to_be_dug = any(["ore" in asgnmt for asgnmt in ideal_queue_per_factory[f_id]])
+                    # is_ore_assigned = any(["ore_" in asgnmt for asgnmt in f_units_assignments.values()])
+
+                    if cur_turn in (1, 2, 3, 4, 5) or (len(f_units) < 9):
+                        actions[f_id] = factory.build_light()
+                        self.position_registry[(cur_turn + 1, tuple(factory.pos))] = factory.unit_id
+
+        #################################################################################
         #               UNITS ACTIONS HANDLING
         #################################################################################
-        #
-        # monitored_units = ["unit_13", "unit_17"]
-        # monitored_turns = [156, 158, 159, 160, 164, 171]
-        # monitored_units = ["unit_57"]
-        # monitored_turns = [6]
-        monitored_units = []
-        monitored_turns = []
-
         # we go by "priority" because of access to power, "important" units first
         unit_ids_by_priority = sorted(units.keys(), key=lambda u_id: ideal_queue_per_factory[
             self.map_unit_factory[u_id]].index(self.robots_assignments[u_id]))
@@ -336,11 +299,9 @@ class Agent:
                         # ALLO HOUSTON, we have a problem,  # RUN FOR YOU LIFE, LITTLE ROBOT
                         self.position_registry = {k: u_id for k, u_id in self.position_registry.items()
                                                   if u_id != unit_id}  # remove plan, make another one
-                        actions[unit_id] = go_to_factory(unit, game_state, self.position_registry, assigned_factory,
-                                                         tiles_for_assistants_only=assistant_tiles)
+                        actions[unit_id] = go_to_factory(unit, game_state, self.position_registry, assigned_factory)
                     else:
-                        is_spot_free = is_registry_free(game_state.real_env_steps + 1, unit.pos, self.position_registry,
-                                                        unit.unit_id)
+                        is_spot_free = is_registry_free(cur_turn + 1, unit.pos, self.position_registry, unit.unit_id)
                         if (is_spot_free and ((len(unit.action_queue) and (unit.action_queue[0][0] != 5)) or
                                               (not len(unit.action_queue)))):
                             # if on factory tile and not already charging, charge
@@ -389,30 +350,48 @@ class Agent:
             if unit_id in self.fighting_units:
                 continue  # already handled above!
 
+            if game_state.env_steps in time_monitored_turns:
+                start_time = time.time()
+
             unit = units[unit_id]
             # for unit_id, unit in units.items():
             unit_cfg = game_state.env_cfg.ROBOTS[unit.unit_type]
             assignment = self.robots_assignments[unit_id]
             assigned_factory = factories[self.map_unit_factory[unit_id]]
+            is_unit_charging = len(unit.action_queue) and tuple(unit.action_queue[0]) == tuple(
+                unit.recharge(unit_cfg.BATTERY_CAPACITY))
+
+            if is_unit_charging:
+                # we pre-booked the cell for n more turns, we free it now (will be rebooked instantly if still relevant)
+                i = 1
+                while True:
+                    try:
+                        if self.position_registry[(cur_turn + i, tuple(unit.pos))] != unit_id:
+                            break
+                        del self.position_registry[(cur_turn + i, tuple(unit.pos))]
+                        i += 1
+                    except KeyError:
+                        break
 
             if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
                 pass
 
-            if game_state.env_steps in time_monitored_turns:
-                start_time = time.time()
+            # is_unit_busy = len(unit.action_queue) and \
+            #                tuple(unit.action_queue[0]) != unit.recharge(unit_cfg.BATTERY_CAPACITY) and \
+            #                not (unit_id in actions.keys() and len(actions[unit_id]) == 0)
 
-            # if already have something to do, and it has not been overwritten/nullified before
-            if len(unit.action_queue) and not (unit_id in actions.keys() and len(actions[unit_id]) == 0):
+            is_unit_reset = unit_id in actions.keys() and len(actions[unit_id]) == 0
+            is_unit_busy = len(unit.action_queue) and (not is_unit_reset) and (not is_unit_charging)
 
+            if is_unit_busy:  # if already have something to do, and it has not been overwritten/nullified before
                 # running low on power, abort and go back to factory...
-
                 # should be a proper function to check for a create this interruption event
+
                 if "solo" in assignment and unit.power / unit_cfg.DIG_COST < 2 and \
                         any([act[0] == 3 for act in unit.action_queue]):  # only interrupt if digging (act[0] == 3)
                     self.position_registry = {k: u_id for k, u_id in self.position_registry.items()
                                               if u_id != unit_id}  # remove plan, make another one
-                    actions[unit_id] = go_to_factory(unit, game_state, self.position_registry, assigned_factory,
-                                                     tiles_for_assistants_only=assistant_tiles)
+                    actions[unit_id] = go_to_factory(unit, game_state, self.position_registry, assigned_factory)
                 # if unit.unit_id == "unit_15" and game_state.real_env_steps >= 133:
                 #     pass
                 if "duo_main" in assignment and unit.power / unit_cfg.DIG_COST < 2 and \
@@ -425,14 +404,16 @@ class Agent:
                     if assistant_unit is None:
                         self.position_registry = {k: u_id for k, u_id in self.position_registry.items()
                                                   if u_id != unit_id}  # remove plan, make another one
-                        actions[unit_id] = go_to_factory(unit, game_state, self.position_registry, assigned_factory,
-                                                         tiles_for_assistants_only=assistant_tiles)
+                        actions[unit_id] = go_to_factory(unit, game_state, self.position_registry, assigned_factory)
+                if game_state.env_steps in time_monitored_turns:
+                    end_time = time.time()
+                    local_time = str(end_time - start_time)
+                    with open('data/a_monitor_execution_time_by_unit.txt', 'a') as f:
+                        f.write(str(game_state.real_env_steps) + "[" + str(unit_id) + "]: " + local_time + "\n")
+                    pass
                 continue  # stop here if already have some actions to do
             elif unit_id not in actions.keys():
                 actions[unit_id] = list()
-            # if game_state.real_env_steps >= 20 and unit.unit_id == "unit_53":
-            #     pass
-            # take power first if you can ?
 
             if assignment.startswith("water_duo_main") or assignment.startswith("ore_duo_main"):
                 dest_tile = assignment_tile_map_per_factory[self.map_unit_factory[unit_id]][assignment]
@@ -465,13 +446,12 @@ class Agent:
                 dug_tile = assignment_tile_map_per_factory[self.map_unit_factory[unit_id]][assignment]
                 actions[unit_id].extend(go_dig_resource(
                     unit, game_state, self.position_registry, dug_tile, assigned_factory=assigned_factory,
-                    factories_power=factories_power, tiles_for_assistants_only=assistant_tiles))
+                    factories_power=factories_power))
             elif assignment.startswith("dig_rubble"):
                 # tiles_scores = score_rubble_tiles_to_dig(game_state, assigned_factory)
                 actions[unit_id].extend(go_dig_rubble(
                     unit, game_state, self.position_registry, assigned_factory, factories_power,
-                    self.rubble_tiles_being_dug, tiles_scores=None, n_min_digs=5, n_desired_digs=8,
-                    tiles_for_assistants_only=assistant_tiles))
+                    self.rubble_tiles_being_dug, tiles_scores=None, n_min_digs=5, n_desired_digs=8))
                         # break
             else:
                 # if np.array_equal(unit.pos, assigned_factory.pos):
@@ -480,21 +460,62 @@ class Agent:
                 # debug purposes only!  # todo: replace that self destruct
                 actions[unit_id].extend([unit.self_destruct(repeat=0, n=1)])
 
-            # if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
-            #     pass
+            if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
+                pass
 
             if game_state.env_steps in time_monitored_turns:
                 end_time = time.time()
                 local_time = str(end_time-start_time)
+                with open('data/a_monitor_execution_time_by_unit.txt', 'a') as f:
+                    f.write(str(game_state.real_env_steps) + "[" + str(unit_id) + "]: " + local_time + "\n")
                 pass
 
-        if game_state.env_steps in overall_time_monitored_turns:
+        if game_state.env_steps in time_monitored_turns:
             end_time = time.time()
-            local_time = str(end_time-start_time)
+            local_time = str(end_time - start_time)
             pass
 
         # for u_id, action_queue in actions.items():
         # if game_state.real_env_steps >= 6:
         #     pass
+
+        #################################################################################
+        #               FACTORY BEHAVIOR
+        #################################################################################
+
+        for f_id, factory in factories.items():
+            if f_id in actions.keys() or not factory.can_water(game_state):
+                continue  # we already make a unit, can't water this turn
+
+            current_water_cost = max(factory.water_cost(game_state), 1)
+            projected_total_cost = water_cost_to_end(current_water_cost, 1000 - cur_turn, increase_rate=0.015) + 10
+            if factory.cargo.water > projected_total_cost and cur_turn > 300:
+                actions[f_id] = factory.water()
+            elif factory.cargo.water > 200 and ((step % 2) == 0 or (step % 11) == 0):
+                actions[f_id] = factory.water()  # attempt to get a bit more power for cheap
+            else:
+                f_units = {u_id: u for u_id, u in units.items() if u_id in self.map_unit_factory.keys()
+                           and self.map_unit_factory[u_id] == f_id}
+                f_units_assignments = {u_id: asgnmt for u_id, asgnmt in self.robots_assignments.items()
+                                       if u_id in f_units.keys()}
+                is_water_heavy_dug = any([u.unit_type == "HEAVY" and "water_" in f_units_assignments[u_id] and
+                                          "assist_" not in f_units_assignments[u_id] for u_id, u in f_units.items()])
+                # if is_water_heavy_dug and factory.cargo.water > 160 and cur_turn < 250 and factory.power < 200:
+                #     actions[f_id] = factory.water()
+                if factory.cargo.water > 350 and factory.power < 250:# and cur_turn < 300:
+                    actions[f_id] = factory.water()
+                    # unsure about that one... should at least check if the water is currently dug, i.e. unit on tile
+
+
+        # safe mode: ON
+        # valid_actions = {u_id: acts for u_id, acts in actions.items() if u_id in factories.keys() or
+        #                  (u_id not in factories.keys() and not tuple("DO_NOTHING_TAG") == tuple(acts[0]))}
+
+        # cheap action optimiser!
+        for u_id in list(actions.keys()):
+            if u_id in factories.keys():
+                continue  # (special because not iterable...)
+            if tuple(tuple(a) for a in actions[u_id]) == tuple(tuple(a) for a in units[u_id].action_queue):
+                del actions[u_id]
 
         return actions
