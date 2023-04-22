@@ -53,13 +53,13 @@ if __name__ == "__main__":
     # observation, d = joblib.load(f"data/export_1.joblib")
     # agent_fn(observation, d)
 
-    for i in range(1, 1000):
+    for i in range(1, 1006):
         print("debug: ", i)
         # then replay whatever turn with possibility of debugging
         export_file = f"data/export_{i}.joblib"
         observation, d = joblib.load(export_file)
-        if i == 17:
-            print("debug time!")
+        # if i == 17:
+        #     print("debug time!")
         actions = agent_fn(observation, d)
     # print()
     # send actions to engine

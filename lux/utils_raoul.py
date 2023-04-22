@@ -210,11 +210,14 @@ def assess_units_main_threat(units, op_units):
     return {unit_id: assess_tile_main_threat(unit.pos, op_units) for unit_id, unit in units.items()}
 
 
+
 def assess_tile_main_threat(tile, op_units):
     """
     identify the main threat for input tile (the nearest unit, biggest if a tie, most power if tie)
     :return: dict my_unit_id: (op_u_id, manh_dist, op_unit.unit_type, op_unit.power)
     """
+    if not len(op_units):
+        return None
     dist_to_op_u = manhattan_dist_vect_point(np.array([op_u.pos for op_u in op_units.values()]), tile)
     threats_l = sorted([(op_u_id, dist, op_u.unit_type, op_u.power)
                         for (op_u_id, op_u), dist in zip(op_units.items(), dist_to_op_u)],
@@ -249,6 +252,229 @@ def get_pos_power_cargo(unit, unit_pos=None, unit_power=None, unit_cargo=None):
     # if unit_cargo is None:
     #     unit_cargo = [(unit.cargo.ice, 0), (unit.cargo.ore, 1), (unit.cargo.water, 2), (unit.cargo.metal, 3)]
     return unit_pos, unit_power, unit_cargo
+
+
+def factory_lichen_count(factory, game_state):
+    return np.sum(game_state.board.lichen[game_state.board.lichen_strains == factory.strain_id])
+
+
+def approx_factory_lichen_tile_count(factory, game_state, lichen_threshold=50):
+    return np.sum([lchn >= lichen_threshold
+                   for lchn in game_state.board.lichen[game_state.board.lichen_strains == factory.strain_id]])
+
+
+# count lichen directly around a factory
+def approx_factory_lichen_count(factory, game_state, obs_square_demi_size=4):
+    assert obs_square_demi_size >= 2
+    lichen_count = 0
+    f_x, f_y = factory.pos[0], factory.pos[1]
+    for x in range(max(0, f_x-obs_square_demi_size), min(47, f_x+obs_square_demi_size)):
+        for y in range(max(0, f_y-obs_square_demi_size), min(47, f_y+obs_square_demi_size)):
+            if abs(f_x-x) <= 1 and abs(f_y-x) <= 1:
+                continue
+            if game_state.board.lichen_strains[x, y] == factory.strain_id:
+                lichen_count += game_state.board.lichen[x, y]
+    return lichen_count
+
+
+def find_sweet_attack_spots_on_factory(op_factory, game_state, max_rubble=10, min_lichen=0,
+                                       exclude_adj_to_factory_tiles=True):
+    f_x, f_y = op_factory.pos[0], op_factory.pos[1]
+    all_factories_tiles = np.array([f.pos for f in game_state.factories["player_0"].values()] +
+                                   [f.pos for f in game_state.factories["player_1"].values()])
+
+    # define 4 times 3 pairs that can be occupied IF resource here
+    # [(occupied_tile), (if_resources_here)]
+    resources_t = [[(f_x-3, f_y-1), (f_x-2, f_y-1)], [(f_x-3, f_y), (f_x-2, f_y)], [(f_x-3, f_y+1), (f_x-2, f_y+1)],
+                   [(f_x+3, f_y-1), (f_x+2, f_y-1)], [(f_x+3, f_y), (f_x+2, f_y)], [(f_x+3, f_y+1), (f_x+2, f_y+1)],
+                   [(f_x-1, f_y-3), (f_x-1, f_y-2)], [(f_x, f_y-3), (f_x, f_y-2)], [(f_x+1, f_y-3), (f_x+1, f_y-3)],
+                   [(f_x-1, f_y+3), (f_x-1, f_y+2)], [(f_x, f_y+3), (f_x, f_y+2)], [(f_x+1, f_y+3), (f_x+1, f_y+3)]]
+
+    attack_tiles_resources = list()
+    for t_main, t_dep in resources_t:
+        if (not 0 <= t_main[0] < 47) or (not 0 <= t_main[1] < 47):
+            continue
+        if exclude_adj_to_factory_tiles and \
+                np.min(manh_dist_to_factory_vect_point(np.array(t_main), all_factories_tiles)) <= 1:
+            continue
+        if game_state.board.ice[t_dep[0], t_dep[1]] or game_state.board.ice[t_dep[0], t_dep[1]]:
+            attack_tiles_resources.append(t_main)
+
+    others_t = [(f_x-3, f_y-1), (f_x-3, f_y+1), (f_x+3, f_y-1), (f_x+3, f_y+1),
+                (f_x-1, f_y-3), (f_x+1, f_y-3), (f_x-1, f_y+3), (f_x+1, f_y+3)]
+    attack_tiles_lichen = list()
+    for t in others_t:
+        if (not 0 <= t[0] < 47) or (not 0 <= t[1] < 47):
+            continue
+        if exclude_adj_to_factory_tiles and \
+                np.min(manh_dist_to_factory_vect_point(np.array(t), all_factories_tiles)) <= 1:
+            continue
+        if game_state.board.lichen[t[0], t[1]] >= min_lichen and \
+                ((not game_state.board.lichen[t[0], t[1]]) or
+                 game_state.board.lichen_strains[t[0], t[1]] == op_factory.strain_id) \
+                and t not in attack_tiles_resources:
+            if game_state.board.rubble[t[0], t[1]] <= max_rubble:
+                attack_tiles_lichen.append(t)
+
+    return attack_tiles_resources, attack_tiles_lichen
+
+
+def find_sweet_rest_spots_nearby_factory(factory, game_state):
+    f_x, f_y = factory.pos[0], factory.pos[1]
+    all_factories_tiles = np.array([f.pos for f in game_state.factories["player_0"].values()] +
+                                   [f.pos for f in game_state.factories["player_1"].values()])
+
+    delta_options = [(6, 3), (6, -3), (-6, 3), (-6, -3),
+                     (3, 6), (-3, 6), (3, -6), (-3, -6),
+                     (0, 7), (7, 0), (0, -7), (-7, 0)]
+
+    rest_tiles = list()
+    for delta in delta_options:
+        new_pos = f_x + delta[0], f_y + delta[1]
+        if (not 0 <= new_pos[0] < 47) or (not 0 <= new_pos[1] < 47):
+            continue
+        if np.min(manh_dist_to_factory_vect_point(np.array(new_pos), all_factories_tiles)) <= 2:
+            continue
+        if game_state.board.ice[new_pos[0], new_pos[1]] or game_state.board.ice[new_pos[0], new_pos[1]]:
+            continue
+        rest_tiles.append(new_pos)
+    return rest_tiles
+
+
+def find_guarded_spot(unit, game_state, assigned_factory, bullies_register, dist_to_bullies=5, dist_to_own_factories=6,
+                      dist_to_op_factories=6):
+    player_me = "player_0" if unit.unit_id in game_state.units["player_0"].keys() else "player_1"
+    player_op = "player_1" if player_me == "player_0" else "player_0"
+    op_factory_tiles = np.array([f.pos for f in game_state.factories[player_op].values()])
+    my_factory_tiles = np.array([f.pos for f in game_state.factories[player_me].values()])
+    all_bully_tiles = np.array([t for t in bullies_register.values()])
+    # registered_tiles = np.array(op_factory_tiles + my_factory_tiles + all_bully_tiles)
+    # op_factory_tiles, my_factory_tiles = np.array()
+
+    # define a reasonable "danger corridor" where to park rather than everywhere
+    min_x, min_y = np.min(np.array([t for t in op_factory_tiles]), axis=0)
+    min_x, min_y = max(0, min(min_x, assigned_factory.pos[0]) - 1), max(0, min(min_y, assigned_factory.pos[1]) - 1)
+    max_x, max_y = np.max(np.array([t for t in op_factory_tiles]), axis=0)
+    max_x, max_y = min(47, max(max_x, assigned_factory.pos[0]) + 1), min(47, max(max_y, assigned_factory.pos[1]) + 1)
+    if max_x - min_x <= 10:
+        min_x, max_x = max(min_x - 3, 0), min(max_x + 3, 47)
+    if max_y - min_y <= 10:
+        min_y, max_y = max(min_y - 3, 0), min(max_y + 3, 47)
+
+    guarded_tile = None
+    n = dist_to_own_factories
+    while n <= dist_to_own_factories + 25 and guarded_tile is None:
+        for dx in range(-n, n + 1):
+            if guarded_tile is not None:
+                break
+            tile_options = [(dx, n - abs(dx))] if abs(dx) == n else [(dx, n - abs(dx)), (dx, abs(dx) - n)]
+            for delta in tile_options:
+                t_a = np.array(delta) + assigned_factory.pos
+                if (not 0 <= t_a[0] < 48) or (not 0 <= t_a[1] < 48) or (not min_x <= t_a[0] <= max_x) or \
+                        (not min_y <= t_a[1] <= max_y):
+                    continue  # next move not in the map
+                if game_state.board.ice[t_a[0], t_a[1]] or game_state.board.ore[t_a[0], t_a[1]]:
+                    continue
+                if len(all_bully_tiles) and np.min(manhattan_dist_vect_point(all_bully_tiles, t_a)) < dist_to_bullies:
+                    continue
+                if len(my_factory_tiles) and \
+                        np.min(manhattan_dist_vect_point(my_factory_tiles, t_a)) < dist_to_own_factories:
+                    continue
+                if len(op_factory_tiles) and \
+                        np.min(manhattan_dist_vect_point(op_factory_tiles, t_a)) < dist_to_op_factories:
+                    continue
+                guarded_tile = t_a  # fine, that's our tile, we go there!
+                break
+        n += 1
+    return tuple(guarded_tile)
+
+
+def get_tiles_around(pos, radius):
+    tiles = list()
+    for i in range(radius):
+        options = [(i, radius-i), (-i, radius-i), (i, i-radius), (-i, i-radius)]
+        for opt in options:
+            if (not 0 <= pos[0] + opt[0] < 47) or (not 0 <= pos[1] + opt[1] < 47):
+                continue
+            tiles.append((pos[0] + opt[0], pos[1] + opt[1]))
+    return tiles
+
+
+def find_intermediary_spot(unit, game_state, target_pos, unit_pos=None, max_dist=20):
+    unit_pos = unit.pos if unit_pos is None else unit_pos
+    assert manhattan_dist_points(target_pos, unit_pos) >= max_dist
+
+    player_me = "player_0" if unit.unit_id in game_state.units["player_0"].keys() else "player_1"
+    player_op = "player_1" if player_me == "player_0" else "player_0"
+    my_factory_tiles = np.array([f.pos for f in game_state.factories[player_me].values()])
+    op_factory_tiles = np.array([f.pos for f in game_state.factories[player_op].values()])
+
+    for aim_dist in range(max_dist, max(int(max_dist/2), max(max_dist-10, 0)), -1):
+        tiles = get_tiles_around(unit_pos, aim_dist)
+
+        for tile in sorted(tiles, key=lambda t: manhattan_dist_points(target_pos, np.array(t))):
+            distances_to_factories = chebyshev_dist_vect_point(op_factory_tiles, np.array(tile))
+            if len(distances_to_factories) and np.min(distances_to_factories) == 1:
+                continue  # don't go through an opponent factory
+
+            distances_to_factories = chebyshev_dist_vect_point(my_factory_tiles, np.array(tile))
+            if len(distances_to_factories) and np.min(distances_to_factories) == 1:
+                continue  # avoid my factories for that
+
+            if game_state.board.ice[tile[0], tile[1]] or game_state.board.ore[tile[0], tile[1]]:
+                continue
+
+            return np.array(tile)
+
+    return None
+
+
+def prioritise_attack_tiles_nearby(unit, game_state, position_registry, unit_pos=None,
+                                   starting_turn=None, lichen_threshold=40, control_area=2):
+    init_turn = game_state.real_env_steps if starting_turn is None else starting_turn
+    unit_pos = unit.pos if unit_pos is None else unit_pos
+    all_factories_tiles = np.array([f.pos for f in game_state.factories["player_0"].values()] +
+                                   [f.pos for f in game_state.factories["player_1"].values()])
+
+    op_player = "player_1" if unit.unit_id in game_state.units["player_0"].keys() else "player_0"
+    op_strain_ids = [f.strain_id for f in game_state.factories[op_player].values()]
+    obs_n = control_area
+    attack_options = list()  # [(tile, score)]
+    for t in [(dx, dy) for dx in range(-obs_n, obs_n+1) for dy in range(-obs_n+abs(dx), obs_n-abs(dx)+1)]:
+        new_pos = unit_pos + np.array(t)
+        if (not 0 <= new_pos[0] < 47) or (not 0 <= new_pos[1] < 47):
+            continue
+        min_dist_to_fact = np.min(manh_dist_to_factory_vect_point(all_factories_tiles, new_pos))
+        dist_to_tile = abs(t[0]) + abs(t[1])
+        if not min_dist_to_fact:
+            continue
+        lichen_on_tile = game_state.board.lichen[new_pos[0], new_pos[1]]
+        if lichen_on_tile <= lichen_threshold or \
+                game_state.board.lichen_strains[new_pos[0], new_pos[1]] not in op_strain_ids:
+            continue
+        if not all([is_registry_free(init_turn + i + dist_to_tile, new_pos, position_registry, unit.unit_id)
+                    for i in range(2)]):
+            continue
+        score = dist_to_tile * 50 - lichen_on_tile + (70 if min_dist_to_fact == 1 else 0)
+        attack_options.append((new_pos, score))
+
+    attack_options = sorted(attack_options, key=lambda opt: opt[1])
+    return [a[0] for a in attack_options]
+
+
+# def circle_factory_lichen_count(factory, game_state, obs_square_demi_size=4):
+#     assert obs_square_demi_size >= 2
+#     lichen_count = 0
+#     f_x, f_y = factory.pos[0], factory.pos[1]
+#     for x in range(max(0, f_x-obs_square_demi_size), min(47, f_x+obs_square_demi_size)):
+#         for y in range(max(0, f_y-obs_square_demi_size), min(47, f_y+obs_square_demi_size)):
+#             if abs(f_x-x) <= 1 and abs(f_y-x) <= 1:
+#                 continue
+#
+#             if game_state.board.lichen_strains[x, y] == factory.strain_id:
+#                 lichen_count += game_state.board.lichen[x, y]
+#     return lichen_count
+#
 
 # make trivial itinerary between unit and target pos
 # favors clock-wise movements, i,e, prioritise up > right > down > left

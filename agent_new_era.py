@@ -8,21 +8,18 @@ from lux.kit import obs_to_game_state, GameState, EnvConfig
 from lux.utils import direction_to, my_turn_to_place_factory
 from lux.utils_raoul import manhattan_dist_vect_point, manhattan_dist_points, chebyshev_dist_points, \
     chebyshev_dist_vect_point, weighted_rubble_adjacent_density, score_rubble_tiles_to_dig, water_cost_to_end, \
-    assess_units_main_threat, is_unit_stronger, is_unit_safe, is_registry_free
-from agent_tricks import assist_adj_digging, go_adj_dig, go_to_factory, go_dig_resource, go_dig_rubble, go_fight
-from assignments import give_assignment, decide_factory_regime, assign_factories_resource_tiles, \
+    assess_units_main_threat, is_unit_stronger, is_unit_safe, is_registry_free, find_sweet_attack_spots_on_factory, \
+    find_sweet_rest_spots_nearby_factory
+from agent_tricks import assist_adj_digging, go_adj_dig, go_to_factory, go_dig_resource, go_dig_rubble, go_resist, \
+    go_bully
+from assignments import decide_factory_regime, assign_factories_resource_tiles, \
     update_assignments, get_ideal_assignment_queue
 
 
 # debug purposes
-monitored_units = ["unit_48"]
-# monitored_turns = [436]
-# monitored_turns = list(range(350, 360))
-monitored_turns = [360]
-# time_monitored_turns = [162, 164]
-# time_monitored_turns = [875, ]
+monitored_units = []
+monitored_turns = []
 time_monitored_turns = []
-
 
 class Agent:
     def __init__(self, player: str, env_cfg: EnvConfig) -> None:
@@ -45,6 +42,7 @@ class Agent:
         self.position_registry = dict()  # (turn, (x, y)): u_id
         self.fighting_units = list()  # list of fighting u_id  (remembered to de assign tasks if no more fighting)
         self.factory_regimes = dict()  # f_id: ["high_level_priorities"]
+        self.bullies_register = dict()  # u_id: np.array(bully_tile)
 
     def early_setup(self, step: int, obs, remainingOverageTime: int = 60):
         """
@@ -163,27 +161,25 @@ class Agent:
         # update persistent state in case of death of units or factories
         self.robots_assignments = {u_id: asgnmt for u_id, asgnmt in self.robots_assignments.items()
                                    if u_id in units.keys()}
+        self.bullies_register = {u_id: t for u_id, t in self.bullies_register.items() if u_id in units.keys()}
         self.map_unit_factory = {u_id: f_id for u_id, f_id in self.map_unit_factory.items()
                                  if u_id in units.keys() and f_id in factories.keys()}
 
+        # identify fighting units which are safe now...
         not_fighting_anymore = [u_id for u_id in self.fighting_units if u_id in main_threats.keys() and
-                                main_threats[u_id][1] > 2]  # identify fighting units which are safe now...
+                                (main_threats[u_id] is None or main_threats[u_id][1] > 2)]
         for u_id in not_fighting_anymore:
             actions[u_id] = list()  # free to do whatever now (registry cleaned just below)
         self.fighting_units = list()  # will be reassessed dynamically below...
         self.position_registry = {(turn, (x, y)): u_id for (turn, (x, y)), u_id in self.position_registry.items()
                                   if u_id in units.keys() and turn >= cur_turn and u_id not in not_fighting_anymore}
 
-        if game_state.env_steps in time_monitored_turns:
+        if game_state.real_env_steps in time_monitored_turns:
             start_time = time.time()
 
         # todo: rewrite with: for k in list(keys()) { (...) del d[k] } will reduce cost to n from n^2
         for (turn, (x, y)), unit_id in self.position_registry.items():
             if turn == cur_turn and tuple(units[unit_id].pos) != (x, y):
-
-                if unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
-                    pass
-
                 # print("lost unit: ", unit_id, "    on turn:", game_state.real_env_steps)
                 # reset the unit, as something happened leading to the unit not to be where it should (power issue?)
                 self.position_registry = {key: u_id for key, u_id in self.position_registry.items() if u_id != unit_id}
@@ -223,8 +219,6 @@ class Agent:
             ideal_queue_per_factory[factory_id], assignment_tile_map_per_factory[factory_id] = \
                 get_ideal_assignment_queue(factory, game_state, self.factory_resources_map,
                                            self.factory_regimes[factory_id])
-            # if cur_turn == 101 and factory_id == "factory_5":
-            #     pass
             updated_assignments_d = update_assignments(factory, factory_units, fact_units_assignments,
                                                        ideal_queue_per_factory[factory_id], heavy_reassign=True)
             # delete future actions and positions so it's recomputed
@@ -242,7 +236,27 @@ class Agent:
                                        u_id in units.keys() and self.robots_assignments[u_id].startswith("dig_rubble")
                                        and len(units[u_id].action_queue)}
 
-        if game_state.env_steps in time_monitored_turns:
+        # define bullying tiles of interest
+        resources_bully_tiles, lichen_bully_tiles = list(), list()
+        op_rest_tiles = list()
+        for op_f_id, op_factory in game_state.factories[op_player].items():
+            res_tiles, lich_tiles = find_sweet_attack_spots_on_factory(op_factory, game_state)
+            resources_bully_tiles.extend(res_tiles)
+            lichen_bully_tiles.extend(lich_tiles)
+            op_rest_tiles.extend(find_sweet_rest_spots_nearby_factory(op_factory, game_state))
+        my_rest_tiles = list()
+        for f_id, factory in game_state.factories[self.player].items():
+            my_rest_tiles.extend(find_sweet_rest_spots_nearby_factory(factory, game_state))
+
+        # maintain bully register in case of opponent factory destroyed
+        for unit_id in list(self.bullies_register.keys()):
+            bullied_tile = self.bullies_register[unit_id]
+            if bullied_tile not in resources_bully_tiles + lichen_bully_tiles + op_rest_tiles + my_rest_tiles:
+                actions[unit_id] = list()  # reset bully
+                del self.bullies_register[unit_id]
+                self.position_registry = {key: u_id for key, u_id in self.position_registry.items() if u_id != unit_id}
+
+        if game_state.real_env_steps in time_monitored_turns:
             end_time = time.time()
             local_time = str(end_time-start_time)
             pass
@@ -268,11 +282,20 @@ class Agent:
                                and self.map_unit_factory[u_id] == f_id}
                     f_units_assignments = {u_id: asgnmt for u_id, asgnmt in self.robots_assignments.items()
                                            if u_id in f_units.keys()}
+                    next_asgnmt_needed = None
+                    for asgnmt in ideal_queue_per_factory[f_id]:
+                        if asgnmt not in f_units_assignments:
+                            next_asgnmt_needed = asgnmt
+                            break
                     # nb_heavy = sum([u.unit_type == "HEAVY" for u in f_units.values()])
                     # ore_to_be_dug = any(["ore" in asgnmt for asgnmt in ideal_queue_per_factory[f_id]])
                     # is_ore_assigned = any(["ore_" in asgnmt for asgnmt in f_units_assignments.values()])
 
-                    if cur_turn in (1, 2, 3, 4, 5) or (len(f_units) < 9):
+                    # n_rubble_assist = sum(["assist_" in asgnmt or "dig_rubble" in asgnmt for asgnmt in
+                    #                        f_units_assignments.values()])
+                    if cur_turn in (1, 2, 3, 4, 5) or (len(f_units) < 9) or \
+                            (next_asgnmt_needed is not None and ("assist_" in next_asgnmt_needed or
+                                                                 "dig_rubble" in next_asgnmt_needed)):
                         actions[f_id] = factory.build_light()
                         self.position_registry[(cur_turn + 1, tuple(factory.pos))] = factory.unit_id
 
@@ -327,8 +350,8 @@ class Agent:
                     # self.fighting_units.append(unit_id)  # need to know we're fighting to stop weird moves after?
                     self.position_registry = {k: u_id for k, u_id in self.position_registry.items()
                                               if u_id != unit_id}  # remove plan, make another one
-                    actions[unit_id] = go_fight(unit, game_state, self.position_registry, op_unit, assigned_factory,
-                                                main_threats[unit_id])
+                    actions[unit_id] = go_resist(unit, game_state, self.position_registry, op_unit, assigned_factory,
+                                                 main_threats[unit_id])
                     self.fighting_units.append(unit_id)
                     # if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
                     #     pass
@@ -338,8 +361,8 @@ class Agent:
                     # self.fighting_units.append(unit_id)  # need to know we're fighting to stop weird moves after?
                     self.position_registry = {k: u_id for k, u_id in self.position_registry.items()
                                               if u_id != unit_id}  # remove plan, make another one
-                    actions[unit_id] = go_fight(unit, game_state, self.position_registry, op_unit, assigned_factory,
-                                                main_threats[unit_id], allow_weaker=True)
+                    actions[unit_id] = go_resist(unit, game_state, self.position_registry, op_unit, assigned_factory,
+                                                 main_threats[unit_id], allow_weaker=True)
                     self.fighting_units.append(unit_id)
                     # if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
                     #     pass
@@ -350,7 +373,7 @@ class Agent:
             if unit_id in self.fighting_units:
                 continue  # already handled above!
 
-            if game_state.env_steps in time_monitored_turns:
+            if game_state.real_env_steps in time_monitored_turns:
                 start_time = time.time()
 
             unit = units[unit_id]
@@ -405,12 +428,13 @@ class Agent:
                         self.position_registry = {k: u_id for k, u_id in self.position_registry.items()
                                                   if u_id != unit_id}  # remove plan, make another one
                         actions[unit_id] = go_to_factory(unit, game_state, self.position_registry, assigned_factory)
-                if game_state.env_steps in time_monitored_turns:
+                if game_state.real_env_steps in time_monitored_turns:
                     end_time = time.time()
-                    local_time = str(end_time - start_time)
-                    with open('data/a_monitor_execution_time_by_unit.txt', 'a') as f:
-                        f.write(str(game_state.real_env_steps) + "[" + str(unit_id) + "]: " + local_time + "\n")
-                    pass
+                    local_time = str(round(float(end_time - start_time), 3))
+                    if (end_time - start_time) > 1.:
+                        with open('data/a_monitor_execution_time_by_unit.txt', 'a') as f:
+                            f.write(str(game_state.real_env_steps) + "[" + str(unit_id) + "]: " + local_time + "\n")
+                        pass
                 continue  # stop here if already have some actions to do
             elif unit_id not in actions.keys():
                 actions[unit_id] = list()
@@ -452,7 +476,10 @@ class Agent:
                 actions[unit_id].extend(go_dig_rubble(
                     unit, game_state, self.position_registry, assigned_factory, factories_power,
                     self.rubble_tiles_being_dug, tiles_scores=None, n_min_digs=5, n_desired_digs=8))
-                        # break
+            elif assignment.startswith("bully"):
+                actions[unit_id].extend(go_bully(
+                    unit, game_state, self.position_registry, assigned_factory, self.bullies_register, factories_power,
+                    my_rest_tiles, op_rest_tiles, resources_bully_tiles, lichen_bully_tiles))
             else:
                 # if np.array_equal(unit.pos, assigned_factory.pos):
                 #     actions[unit_id].extend([unit.move(1)])
@@ -463,14 +490,15 @@ class Agent:
             if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
                 pass
 
-            if game_state.env_steps in time_monitored_turns:
+            if game_state.real_env_steps in time_monitored_turns:
                 end_time = time.time()
-                local_time = str(end_time-start_time)
-                with open('data/a_monitor_execution_time_by_unit.txt', 'a') as f:
-                    f.write(str(game_state.real_env_steps) + "[" + str(unit_id) + "]: " + local_time + "\n")
-                pass
+                local_time = str(round(float(end_time-start_time), 3))
+                if (end_time-start_time) > 1.:
+                    with open('data/a_monitor_execution_time_by_unit.txt', 'a') as f:
+                        f.write(str(game_state.real_env_steps) + "[" + str(unit_id) + "]: " + local_time + "\n")
+                    pass
 
-        if game_state.env_steps in time_monitored_turns:
+        if game_state.real_env_steps in time_monitored_turns:
             end_time = time.time()
             local_time = str(end_time - start_time)
             pass
@@ -480,7 +508,7 @@ class Agent:
         #     pass
 
         #################################################################################
-        #               FACTORY BEHAVIOR
+        #               FACTORY WATERING
         #################################################################################
 
         for f_id, factory in factories.items():
@@ -517,5 +545,10 @@ class Agent:
                 continue  # (special because not iterable...)
             if tuple(tuple(a) for a in actions[u_id]) == tuple(tuple(a) for a in units[u_id].action_queue):
                 del actions[u_id]
+            elif len(actions[u_id]) > 20:
+                actions[u_id] = actions[u_id][:20]
+
+        if cur_turn in monitored_turns:
+            pass
 
         return actions

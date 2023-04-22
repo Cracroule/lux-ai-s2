@@ -26,7 +26,7 @@ def get_ideal_assignment_queue(factory, game_state, assigned_resources, factory_
 
     queue = list()
 
-    n_exploited_ore, n_exploited_ice, n_diggers, n_fighters = 0, 0, 0, 0
+    n_exploited_ore, n_exploited_ice, n_diggers, n_bullies = 0, 0, 0, 0
     n_adjacent_ice = sum([d == 1 for d in sorted_ice_distances])
     n_adjacent_ore = sum([d == 1 for d in sorted_ore_distances])
     max_distance_to_exploit_ore, max_distance_to_exploit_ice = 10, 5
@@ -57,121 +57,25 @@ def get_ideal_assignment_queue(factory, game_state, assigned_resources, factory_
                 n_diggers += 1
                 queue.extend([f"dig_rubble_{n_diggers}"])
 
-    for i in range(5):  # then fight x10
-        n_fighters += 1
-        queue.extend([f"fight_{n_fighters}"])
+    for i in range(30):  # then fight x10
+        n_bullies += 1
+        queue.extend([f"bully_{n_bullies}"])
 
-    asngmt_tile_map = assign_tiles(factory, queue, sorted_ice_tiles, sorted_ore_tiles)
+    # for i in range(10):
+    #     n_diggers += 1
+    #     queue.extend([f"dig_rubble_{n_diggers}"])
+
+    asngmt_tile_map = assign_tiles(factory, queue, sorted_ice_tiles, sorted_ore_tiles,
+                                   max_distance_to_exploit_ore=max_distance_to_exploit_ore,
+                                   max_distance_to_exploit_ice=max_distance_to_exploit_ice)
     # check we did the tiles mapping correctly
     assert all([asgnmt in asngmt_tile_map.keys() for asgnmt in queue])
 
     return queue, asngmt_tile_map
 
 
-def get_ideal_assignment_queue_old(factory, game_state, assigned_resources, factory_regime=None):
-    """
-    Ideally, should be function of the turn and the position of the factory...
-    Will be improved over time?
-
-    :return: ordered list of assignments
-    """
-
-    ice_tiles = np.array(assigned_resources["ice"][factory.unit_id])
-    ore_tiles = np.array(assigned_resources["ore"][factory.unit_id])
-
-    # sorted_ice_distances = sorted(custom_dist_vect_point(ice_tiles, factory.pos)) if len(ice_tiles) else []
-    sorted_ice_distances = sorted(manh_dist_to_factory_vect_point(ice_tiles, factory.pos)) if len(ice_tiles) else []
-    sorted_ore_distances = sorted(manh_dist_to_factory_vect_point(ore_tiles, factory.pos)) if len(ore_tiles) else []
-    sorted_ice_tiles = sorted(ice_tiles, key=lambda t: manh_dist_to_factory_points(t, factory.pos))
-    sorted_ore_tiles = sorted(ore_tiles, key=lambda t: manh_dist_to_factory_points(t, factory.pos))
-
-    queue = list()
-
-    n_exploited_ore, n_exploited_ice, n_diggers, n_fighters = 0, 0, 0, 0
-    n_adjacent_ice = sum([d == 1 for d in sorted_ice_distances])
-    n_adjacent_ore = sum([d == 1 for d in sorted_ore_distances])
-
-    # TODO: remove below trick
-    # n_exploited_ore = 10
-
-    # todo: expend information available: nb of units AND factory details (water available)
-
-    max_distance_to_exploit_ore, max_distance_to_exploit_ice = 10, 5
-    if game_state.real_env_steps < 100:
-        # go for ore first
-        if n_adjacent_ore > n_exploited_ore:
-            n_exploited_ore += 1
-            queue.extend([f"ore_duo_main_{n_exploited_ore}", f"ore_duo_assist_{n_exploited_ore}"])
-        elif len(sorted_ore_distances) > n_exploited_ore \
-                and sorted_ore_distances[n_exploited_ore] <= max_distance_to_exploit_ore:
-            n_exploited_ore += 1
-            queue.extend([f"ore_solo_{n_exploited_ore}"])
-
-        # then water
-        if n_adjacent_ice > n_exploited_ice:
-            n_exploited_ice += 1
-            queue.extend([f"water_duo_main_{n_exploited_ice}", f"water_duo_assist_{n_exploited_ice}"])
-        elif len(sorted_ice_distances) > n_exploited_ice \
-                and sorted_ice_distances[n_exploited_ice] <= max_distance_to_exploit_ice:
-            n_exploited_ice += 1
-            queue.extend([f"water_solo_{n_exploited_ice}"])
-
-    else:  # mid game
-        # water first
-        if n_adjacent_ice > n_exploited_ice:
-            n_exploited_ice += 1
-            queue.extend([f"water_duo_main_{n_exploited_ice}", f"water_duo_assist_{n_exploited_ice}"])
-        elif len(sorted_ice_distances) > n_exploited_ice \
-                and sorted_ice_distances[n_exploited_ice] <= max_distance_to_exploit_ice:
-            n_exploited_ice += 1
-            queue.extend([f"water_solo_{n_exploited_ice}"])
-        # then ore
-        if n_adjacent_ore > n_exploited_ore:
-            n_exploited_ore += 1
-            queue.extend([f"ore_duo_main_{n_exploited_ore}", f"ore_duo_assist_{n_exploited_ore}"])
-        elif len(sorted_ore_distances) > n_exploited_ore \
-                and sorted_ore_distances[n_exploited_ore] <= max_distance_to_exploit_ore:
-            n_exploited_ore += 1
-            queue.extend([f"ore_solo_{n_exploited_ore}"])
-
-    # then one more water
-    if n_adjacent_ice > n_exploited_ice:
-        n_exploited_ice += 1
-        queue.extend([f"water_duo_main_{n_exploited_ice}", f"water_duo_assist_{n_exploited_ice}"])
-    elif len(sorted_ice_distances) > n_exploited_ice and \
-            sorted_ice_distances[n_exploited_ice] <= max_distance_to_exploit_ice:
-        n_exploited_ice += 1
-        queue.extend([f"water_solo_{n_exploited_ice}"])
-
-    for i in range(1):  # then digs x1
-        n_diggers += 1
-        queue.extend([f"dig_rubble_{n_diggers}"])
-
-    for i in range(1):  # then ore again x1
-        if n_adjacent_ore > n_exploited_ore:
-            n_exploited_ore += 1
-            queue.extend([f"ore_duo_main_{n_exploited_ore}", f"ore_duo_assist_{n_exploited_ore}"])
-        elif len(sorted_ore_distances) > n_exploited_ore and \
-                sorted_ore_distances[n_exploited_ore] < max_distance_to_exploit_ore:
-            n_exploited_ore += 1
-            queue.extend([f"ore_solo_{n_exploited_ore}"])
-
-    for i in range(3):  # then digs x3
-        n_diggers += 1
-        queue.extend([f"dig_rubble_{n_diggers}"])
-
-    for i in range(10):  # then fight x10
-        n_fighters += 1
-        queue.extend([f"fight_{n_fighters}"])
-
-    asngmt_tile_map = assign_tiles(factory, queue, sorted_ice_tiles, sorted_ore_tiles)
-    # check we did the tiles mapping correctly
-    assert all([asgnmt in asngmt_tile_map.keys() for asgnmt in queue])
-
-    return queue, asngmt_tile_map
-
-
-def assign_tiles(factory, queue, sorted_ice_tiles, sorted_ore_tiles):
+def assign_tiles(factory, queue, sorted_ice_tiles, sorted_ore_tiles, max_distance_to_exploit_ore=10,
+                 max_distance_to_exploit_ice=5):
     asngmt_tile_map = dict()
     for asgnmt in queue:
         if "water_" in asgnmt and "_assist_" not in asgnmt:
@@ -182,7 +86,16 @@ def assign_tiles(factory, queue, sorted_ice_tiles, sorted_ore_tiles):
             asngmt_tile_map[asgnmt] = sorted_ore_tiles[n_allocated-1]
         elif "_assist_" in asgnmt:
             resource, n_allocated = asgnmt.split('_')[0], int(asgnmt.split('_')[-1])
-            near_factory_tile_from_dig_spot = nearest_factory_tile(sorted_ice_tiles[n_allocated-1], factory.pos)
+            if resource == "water" or resource == "ice":
+                near_factory_tile_from_dig_spot = nearest_factory_tile(sorted_ice_tiles[n_allocated-1], factory.pos)
+            else:
+                near_factory_tile_from_dig_spot = nearest_factory_tile(sorted_ore_tiles[n_allocated - 1], factory.pos)
+            # todo: find a hack if a tile is meant to be used by two different assistants...
+            # below one should do, i.e. hack task
+            # if tuple(near_factory_tile_from_dig_spot) not in [tuple(t) for t in asngmt_tile_map.values()]:
+            #     asngmt_tile_map[asgnmt] = near_factory_tile_from_dig_spot
+            # else:
+            #     queue[:] = ["dig_rubble_100" if x == asgnmt else x for x in queue]
             asngmt_tile_map[asgnmt] = near_factory_tile_from_dig_spot
         else:
             asngmt_tile_map[asgnmt] = None
@@ -288,47 +201,48 @@ def update_assignments(factory, factory_units, cur_units_assignments, ideal_queu
     return reassignments_d
 
 
-def give_assignment(unit, game_state, robots_assignments, map_unit_factory, assigned_resources, ideal_queue,
-                    assigned_factory=None):
-    """
-    Create an assignment based on known info, i.e. already assigned robots and map robot:factory.
-    For now, assignments come in a specific order
-    ideally, any robot who does not know what to do should consult this assignment and act accordingly
-    ideally, they would consult it in order of strength, i.e. bored heavy robots first, then bored light ones
-
-    :param unit: not used for now. Could be used to know if light/heavy later on, or based on current position
-    :param game_state: not used for now, could be used to get info on board
-    :param robots_assignments: dictionary robot_id: assignment
-    :param map_unit_factory: dictionary unit_id: assigned_factory_id
-    :param assigned_factory: desired factory the input robot should be associated with
-    :return: assignment
-    """
-
-    # should ideally do the computation of map_factory_units only once per turn
-    map_factory_units = collections.defaultdict(list)
-    for u_id, f_id in map_unit_factory.items():
-        map_factory_units[f_id].append(u_id)
-
-    # assigned_factory = map_unit_factory[unit.unit_id]
-
-    if assigned_factory is None:
-        # todo: assign factory based on game_state...
-        raise NotImplementedError("assigned_factory must be used for now to get an assignment...")
-    # if ideal_queue is None:
-    #     ideal_queue, _ = get_ideal_assignment_queue(agent, assigned_factory, game_state,
-    #                                                 assigned_resources=assigned_resources)
-
-    existing_factory_assignments = [robots_assignments[u_id] for u_id in map_factory_units[assigned_factory.unit_id]
-                                    if u_id in robots_assignments.keys()]
-    chosen_asgnmt = None
-    for asgnmt in ideal_queue:
-        if asgnmt not in existing_factory_assignments:
-            chosen_asgnmt = asgnmt
-            break
-    if chosen_asgnmt is None:
-        chosen_asgnmt = "fight"
-
-    return chosen_asgnmt
+# def give_assignment(unit, game_state, robots_assignments, map_unit_factory, assigned_resources, ideal_queue,
+#                     assigned_factory=None):
+#     """
+#     Create an assignment based on known info, i.e. already assigned robots and map robot:factory.
+#     For now, assignments come in a specific order
+#     ideally, any robot who does not know what to do should consult this assignment and act accordingly
+#     ideally, they would consult it in order of strength, i.e. bored heavy robots first, then bored light ones
+#
+#     :param unit: not used for now. Could be used to know if light/heavy later on, or based on current position
+#     :param game_state: not used for now, could be used to get info on board
+#     :param robots_assignments: dictionary robot_id: assignment
+#     :param map_unit_factory: dictionary unit_id: assigned_factory_id
+#     :param assigned_factory: desired factory the input robot should be associated with
+#     :return: assignment
+#     """
+#
+#     # # should ideally do the computation of map_factory_units only once per turn
+#     # map_factory_units = collections.defaultdict(list)
+#     # for u_id, f_id in map_unit_factory.items():
+#     #     map_factory_units[f_id].append(u_id)
+#
+#     # assigned_factory = map_unit_factory[unit.unit_id]
+#
+#     if assigned_factory is None:
+#         # todo: assign factory based on game_state...
+#         raise NotImplementedError("assigned_factory must be used for now to get an assignment...")
+#     # if ideal_queue is None:
+#     #     ideal_queue, _ = get_ideal_assignment_queue(agent, assigned_factory, game_state,
+#     #                                                 assigned_resources=assigned_resources)
+#
+#     # existing_factory_assignments = [robots_assignments[u_id] for u_id in map_factory_units[assigned_factory.unit_id]
+#     #                                 if u_id in robots_assignments.keys()]
+#
+#     chosen_asgnmt = None
+#     for asgnmt in ideal_queue:
+#         if asgnmt not in existing_factory_assignments:
+#             chosen_asgnmt = asgnmt
+#             break
+#     if chosen_asgnmt is None:
+#         chosen_asgnmt = "fight"
+#
+#     return chosen_asgnmt
 
 
 def assign_factories_resource_tiles(factories, game_state):
