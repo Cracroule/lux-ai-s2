@@ -1,5 +1,6 @@
 import collections
 import numpy as np
+import random
 import time
 import scipy
 import sys
@@ -8,7 +9,7 @@ from lux.utils_raoul import get_direction_code_from_delta, manhattan_dist_vect_p
     score_rubble_tiles_to_dig, score_rubble_add_proximity_penalty_to_tiles_to_dig, custom_dist_points, \
     is_registry_free, count_day_turns, is_unit_stronger, get_pos_power_cargo, manh_dist_to_factory_vect_point, \
     manh_dist_to_factory_points, find_sweet_attack_spots_on_factory, find_guarded_spot, find_intermediary_spot, \
-    find_sweet_rest_spots_nearby_factory, prioritise_attack_tiles_nearby
+    find_sweet_rest_spots_nearby_factory, prioritise_attack_tiles_nearby, threat_category, delete_value_from_dict
 # from scipy.spatial.distance import cdist
 
 from lux.kit import obs_to_game_state, GameState, EnvConfig
@@ -558,14 +559,164 @@ def go_resist(unit, game_state, position_registry, op_unit, assigned_factory, th
     return actions
 
 
+def go_resist2(unit, game_state, position_registry, op_unit, assigned_factory, threat_dist, next_unit_action,
+               factories_power, unit_pos=None, unit_power=None, unit_cargo=None, is_aggressive=False):
+
+    actions, actions_counter = list(), 0
+    unit_cfg, init_turn = game_state.env_cfg.ROBOTS[unit.unit_type], game_state.real_env_steps
+    unit_pos, unit_power, unit_cargo = get_pos_power_cargo(unit, unit_pos, unit_power, unit_cargo)
+    player_me = "player_0" if unit.unit_id in game_state.units["player_0"].keys() else "player_1"
+    player_op = "player_1" if player_me == "player_0" else "player_0"
+    opponent_factory_tiles = np.array([f.pos for f in game_state.factories[player_op].values()])
+    threat_level = threat_category(unit, op_unit)
+    all_deltas = [(1, 0), (-1, 0), (0, 1), (0, -1), (0, 0)]
+    random.shuffle(all_deltas)
+
+    # pick power if it helps the resistance
+    cur_cheb_dist_to_factory = chebyshev_dist_points(assigned_factory.pos, unit_pos)
+    if cur_cheb_dist_to_factory <= 1 and threat_level == "threaten_losing":
+        needed_power_to_dominate = op_unit.power + unit_cfg.ACTION_QUEUE_POWER_COST - unit_power + 1
+        if 0 < needed_power_to_dominate < factories_power[assigned_factory.unit_id] and \
+                is_registry_free(init_turn + actions_counter + 1, unit_pos, position_registry, unit.unit_id):
+            actions_counter += 1
+            position_registry[(init_turn + actions_counter, tuple(unit_pos))] = unit.unit_id
+            actions.extend([unit.pickup(4, needed_power_to_dominate)])
+
+    if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
+        pass
+
+    if threat_level == "winning":
+        return None
+
+    # todo: ensure the unit is added as a fighter (to be cleared once not threaten anymore)
+    elif threat_level == "threaten_winning":
+        if threat_dist >= 2:
+            return None
+        op_direction = direction_to(unit.pos, op_unit.pos)
+        if next_unit_action is None or not (next_unit_action[0] == 0 and next_unit_action[1] == op_direction):
+            distances_to_factories = manh_dist_to_factory_vect_point(opponent_factory_tiles, op_unit.pos)
+            if is_registry_free(init_turn + actions_counter + 1, op_unit.pos, position_registry, unit.unit_id) and (
+                    not len(distances_to_factories) or np.min(distances_to_factories) > 0):
+                delete_value_from_dict(position_registry, unit.unit_id)
+                position_registry[(init_turn + actions_counter + 1, tuple(op_unit.pos))] = unit.unit_id
+                actions.extend([unit.move(op_direction)])
+                return actions
+            else:
+                delete_value_from_dict(position_registry, unit.unit_id)
+                actions.extend(wander_n_turns(
+                    unit, game_state, position_registry, assigned_factory, n_wander=1, unit_pos=unit_pos,
+                    starting_turn=init_turn + actions_counter, prioritise_static=False))
+                return actions
+        return None
+
+    elif threat_level == "threaten_losing":
+        if threat_dist == 2:
+            dx, dy = op_unit.pos - unit_pos
+            op_directions = []
+            if abs(dx):
+                op_directions.append(get_direction_code_from_delta((int(dx/abs(dx)), 0)))
+            if abs(dy):
+                op_directions.append(get_direction_code_from_delta((0, int(dy/abs(dy)))))
+            if next_unit_action is not None and (next_unit_action[0] == 0 and next_unit_action[1] in op_directions):
+                # would rather go somewhere else... i.e. any direction except the ones with a dist one with the opponent
+                options = sorted(all_deltas, key=lambda d: 1 if manhattan_dist_points(
+                    unit_pos + np.array(d), op_unit.pos) != 1 else 100)
+            else:
+                return None
+        elif threat_dist > 2:
+            return None
+        elif threat_dist == 1:
+            if chebyshev_dist_points(unit_pos, assigned_factory.pos) <= 1:
+                return None
+            else:
+                if next_unit_action is None or next_unit_action[0] != 0 or next_unit_action[1] == 0:
+                    # would rather go somewhere else, priority given to going towards factory
+                    options = sorted([d for d in all_deltas if d != (0, 0)],
+                                     key=lambda d: manh_dist_to_factory_points(unit_pos + np.array(d),
+                                                                               assigned_factory.pos)) + [(0, 0)]
+                else:
+                    return None
+        else:
+            raise NotImplementedError("how?")
+
+    elif threat_level == "losing":
+        if threat_dist == 2:
+            dx, dy = op_unit.pos - unit_pos
+            op_directions = []
+            if abs(dx):
+                op_directions.append(get_direction_code_from_delta((int(dx/abs(dx)), 0)))
+            if abs(dy):
+                op_directions.append(get_direction_code_from_delta((0, int(dy/abs(dy)))))
+            if next_unit_action is not None and (next_unit_action[0] == 0 and next_unit_action[1] in op_directions):
+                # would rather go somewhere else... i.e. any direction except the ones with a dist one with the opponent
+                options = sorted(all_deltas, key=lambda d: 1 if manhattan_dist_points(
+                    unit_pos + np.array(d), op_unit.pos) != 1 else 100)
+            else:
+                return None
+        elif threat_dist > 2:
+            return None
+        elif threat_dist == 1:
+            op_direction = direction_to(unit.pos, op_unit.pos)
+            if chebyshev_dist_points(unit_pos, assigned_factory.pos) <= 1:
+                if next_unit_action is not None and (next_unit_action[0] == 0 and next_unit_action[1] == op_direction):
+                    # would rather go somewhere else than jumping to death
+                    options = sorted(
+                        all_deltas, key=lambda d: 10 if np.array_equal(unit_pos + np.array(d), op_unit.pos) else 1)
+                else:
+                    return None
+            else:
+                if next_unit_action is None or next_unit_action[0] != 0 or next_unit_action[1] == 0 or \
+                        (next_unit_action[0] == 0 and next_unit_action[1] == op_direction):
+                    # would rather go somewhere else, priority given to going towards factory (no stay, not toward him)
+                    options = sorted([d for d in all_deltas if d != (0, 0)], key=lambda d: manh_dist_to_factory_points(
+                        unit_pos + np.array(d), assigned_factory.pos) if not np.array_equal(
+                        unit_pos + np.array(d), op_unit.pos) else 1000) + [(0, 0)]
+                else:
+                    return None
+        else:
+            raise NotImplementedError("how?")
+
+    else:
+        raise NotImplementedError(f"unknown threat level: {threat_level}")
+
+    if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
+        pass
+
+    for delta in options:
+        new_pos = unit_pos + np.array(delta)
+
+        if (not 0 <= new_pos[0] < 48) or (not 0 <= new_pos[1] < 48):
+            continue  # next move not in the map
+
+        distances_to_factories = manh_dist_to_factory_vect_point(opponent_factory_tiles, new_pos)
+        if len(distances_to_factories) and np.min(distances_to_factories) == 0:
+            continue  # don't go through an opponent factory
+
+        if not is_registry_free(init_turn + actions_counter + 1, new_pos, position_registry, unit.unit_id):
+            continue
+
+        dir_code = get_direction_code_from_delta(delta)
+        delete_value_from_dict(position_registry, unit.unit_id)
+        position_registry[(init_turn + actions_counter + 1, tuple(new_pos))] = unit.unit_id
+        actions.extend([unit.move(dir_code)])
+        return actions
+
+    delete_value_from_dict(position_registry, unit.unit_id)
+    # if we could not find something that does not kill anyone... well we wander around ?
+    actions.extend(wander_n_turns(unit, game_state, position_registry, assigned_factory, n_wander=1, unit_pos=unit_pos,
+                                  starting_turn=init_turn + actions_counter, prioritise_static=False))
+    return actions
+
+
 def go_bully(unit, game_state, position_registry, assigned_factory, bullies_register, factories_power, my_rest_tiles,
              op_rest_tiles, resources_bully_tiles, lichen_bully_tiles, unit_pos=None, unit_power=None, unit_cargo=None):
 
     actions, actions_counter = list(), 0
     unit_cfg, init_turn = game_state.env_cfg.ROBOTS[unit.unit_type], game_state.real_env_steps
     unit_pos, unit_power, unit_cargo = get_pos_power_cargo(unit, unit_pos, unit_power, unit_cargo)
-    # # a bit silly to guess that here...
 
+    if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
+        pass
 
     # if nearby factory AND carrying resources transfer them (reassignment handling) and stop (will take power after?)
     is_adj, dir_to_fac = adjacent_to_factory(unit_pos, assigned_factory.pos)
@@ -583,41 +734,43 @@ def go_bully(unit, game_state, position_registry, assigned_factory, bullies_regi
             actions_counter += 1
 
     resources_bully_tiles = sorted(resources_bully_tiles,
-                                   key=lambda t: manhattan_dist_points(unit_pos, np.array(resources_bully_tiles)))
+                                   key=lambda t: manhattan_dist_points(unit_pos, np.array(t)))
     lichen_bully_tiles = sorted(lichen_bully_tiles,
-                                key=lambda t: manhattan_dist_points(unit_pos, np.array(lichen_bully_tiles)))
-    op_rest_tiles = sorted(op_rest_tiles, key=lambda t: manhattan_dist_points(unit_pos, np.array(op_rest_tiles)))
-    my_rest_tiles = sorted(my_rest_tiles, key=lambda t: manhattan_dist_points(unit_pos, np.array(my_rest_tiles)))
+                                key=lambda t: manhattan_dist_points(unit_pos, np.array(t)))
+    op_rest_tiles = sorted(op_rest_tiles, key=lambda t: manhattan_dist_points(unit_pos, np.array(t)))
+    my_rest_tiles = sorted(my_rest_tiles, key=lambda t: manhattan_dist_points(unit_pos, np.array(t)))
 
     if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
         pass
 
+    # if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
+    #     pass
+
     # need to ensure bully is registered, or to wank somewhere else
-    if unit.unit_id not in bullies_register.keys():
-        try:
-            cur_bullied_tile = bullies_register[unit.unit_id]
-        except KeyError:
-            cur_bullied_tile = None
+    try:
+        cur_bullied_tile = bullies_register[unit.unit_id]
+    except KeyError:
+        cur_bullied_tile = None
 
-        if cur_bullied_tile is None:
-            # go to the nearest unregistered rest tile (op factory)
-            for tile in op_rest_tiles:
-                if tile not in bullies_register.values():
-                    cur_bullied_tile = tile
-                    bullies_register[unit.unit_id] = cur_bullied_tile
-                    break
+    if cur_bullied_tile is None:
+        # go to the nearest unregistered rest tile (op factory)
+        for tile in op_rest_tiles:
+            if tile not in bullies_register.values():
+                cur_bullied_tile = tile
+                bullies_register[unit.unit_id] = cur_bullied_tile
+                break
 
-        if cur_bullied_tile is None:  # if still none, go to the nearest unregistered rest tile (my factories)
-            for tile in my_rest_tiles:
-                if tile not in bullies_register.values():
-                    cur_bullied_tile = tile
-                    bullies_register[unit.unit_id] = cur_bullied_tile
-                    break
+    if cur_bullied_tile is None:  # if still none, go to the nearest unregistered rest tile (my factories)
+        for tile in my_rest_tiles:
+            if tile not in bullies_register.values():
+                cur_bullied_tile = tile
+                bullies_register[unit.unit_id] = cur_bullied_tile
+                break
 
-        if cur_bullied_tile is None:  # nowhere to bully...
-            actions.extend(wander_n_turns(unit, game_state, position_registry, assigned_factory, n_wander=3,
-                                          unit_pos=unit_pos, starting_turn=init_turn + actions_counter))
-            return actions
+    if cur_bullied_tile is None:  # nowhere to bully...
+        actions.extend(wander_n_turns(unit, game_state, position_registry, assigned_factory, n_wander=3,
+                                      unit_pos=unit_pos, starting_turn=init_turn + actions_counter))
+        return actions
 
     bully_situation = "unknown"
     if bullies_register[unit.unit_id] in my_rest_tiles:
@@ -631,7 +784,7 @@ def go_bully(unit, game_state, position_registry, assigned_factory, bullies_regi
     proxy_end_game = max(game_state.real_env_steps - 900, 0) / 100
 
     inactive_pow_threshold = 0.2 * (1. - proxy_end_game) * unit_cfg.BATTERY_CAPACITY
-    active_pow_threshold = 0.7 * (1. - proxy_end_game) * unit_cfg.BATTERY_CAPACITY
+    active_pow_threshold = 0.6 * (1. - proxy_end_game) * unit_cfg.BATTERY_CAPACITY
     if manhattan_dist_points(np.array(bullies_register[unit.unit_id]), unit_pos) <= 5 and \
             unit_power >= active_pow_threshold:
         if bully_situation == "home_rest":
@@ -655,32 +808,39 @@ def go_bully(unit, game_state, position_registry, assigned_factory, bullies_regi
                 break
 
     # weird flex proxy to assess if the unit is able to fight!
-    should_fight = unit_power >= (1000 - game_state.real_env_steps) * (unit_cfg.DIG_COST + unit_cfg.MOVE_COST) / 2.
+    should_fight = unit_power >= (1000 - game_state.real_env_steps) * (unit_cfg.DIG_COST + unit_cfg.MOVE_COST) / 2.3
 
     if should_fight:
-        scrutinised_tiles = prioritise_attack_tiles_nearby(
-            unit, game_state, position_registry, unit_pos=unit_pos, starting_turn=init_turn+actions_counter,
-            control_area=(3 if bully_situation == "away_rest" else 2))
-        for attacked_tile in scrutinised_tiles:
-            itin_d = make_itinerary_advanced(unit, attacked_tile, game_state, position_registry,
-                                             starting_turn=init_turn + actions_counter, unit_pos=unit_pos)
-            if np.array_equal(attacked_tile, itin_d["unit_pos"]) and is_registry_free(
-                    init_turn + actions_counter + itin_d["actions_counter"], attacked_tile, position_registry,
-                    unit.unit_id):
-                unit_pos, power_cost = itin_d["unit_pos"], itin_d["power_cost"]
-                if itin_d["power_cost"] > unit_power:
-                    actions.extend(wander_n_turns(unit, game_state, position_registry, assigned_factory, n_wander=3,
-                                                  unit_pos=unit_pos, starting_turn=init_turn + actions_counter))
-                    return actions
-                actions.extend(itin_d["actions"])
-                position_registry.update(itin_d["position_registry"])
-                actions_counter += itin_d["actions_counter"]
+        lichen_attack_actions = attack_opponent_lichen(
+            unit, game_state, position_registry, assigned_factory, control_area=3,
+            starting_turn=init_turn+actions_counter, unit_pos=unit_pos, unit_power=unit_power, unit_cargo=unit_cargo)
 
-                # then dig
-                actions_counter += 1
-                position_registry[(init_turn + actions_counter, tuple(unit_pos))] = unit.unit_id
-                actions.extend([unit.dig(repeat=0, n=1)])
-                return actions
+        if lichen_attack_actions is not None:
+            actions.extend(lichen_attack_actions)
+            return actions
+        # scrutinised_tiles = prioritise_attack_tiles_nearby(
+        #     unit, game_state, position_registry, unit_pos=unit_pos, starting_turn=init_turn+actions_counter,
+        #     control_area=(3 if bully_situation == "away_rest" else 2))
+        # for attacked_tile in scrutinised_tiles:
+        #     itin_d = make_itinerary_advanced(unit, attacked_tile, game_state, position_registry,
+        #                                      starting_turn=init_turn + actions_counter, unit_pos=unit_pos)
+        #     if np.array_equal(attacked_tile, itin_d["unit_pos"]) and is_registry_free(
+        #             init_turn + actions_counter + itin_d["actions_counter"], attacked_tile, position_registry,
+        #             unit.unit_id):
+        #         unit_pos, power_cost = itin_d["unit_pos"], itin_d["power_cost"]
+        #         if itin_d["power_cost"] > unit_power:
+        #             actions.extend(wander_n_turns(unit, game_state, position_registry, assigned_factory, n_wander=3,
+        #                                           unit_pos=unit_pos, starting_turn=init_turn + actions_counter))
+        #             return actions
+        #         actions.extend(itin_d["actions"])
+        #         position_registry.update(itin_d["position_registry"])
+        #         actions_counter += itin_d["actions_counter"]
+        #
+        #         # then dig
+        #         actions_counter += 1
+        #         position_registry[(init_turn + actions_counter, tuple(unit_pos))] = unit.unit_id
+        #         actions.extend([unit.dig(repeat=0, n=1)])
+        #         return actions
 
     # unit has already been registered, if no extra fighting plan just stick around
     guarded_tile = np.array(bullies_register[unit.unit_id])
@@ -695,53 +855,47 @@ def go_bully(unit, game_state, position_registry, assigned_factory, bullies_regi
         actions.extend(itin_d["actions"])
         position_registry.update(itin_d["position_registry"])
         actions_counter += itin_d["actions_counter"]
+        return actions
+
     # then wait there and charge
     actions.extend(wander_n_turns(unit, game_state, position_registry, assigned_factory, n_wander=3,
                                   unit_pos=unit_pos, starting_turn=init_turn + actions_counter))
     return actions
 
 
-    # max_dist = 225
-    # bullied_tile = None
-    # for t in resources_bully_tiles:
-    #     if t not in bullies_register.values():
-    #         if manhattan_dist_points(unit_pos, np.array(t)) <= max_dist:
-    #             bullied_tile = t
-    #         break
-    #
-    # if bullied_tile is None:
-    #     for t in lichen_bully_tiles:
-    #         if t not in bullies_register.values():
-    #             if manhattan_dist_points(unit_pos, np.array(t)) <= max_dist:
-    #                 bullied_tile = t
-    #             break
-    #
-    # if bullied_tile is None:
-    #     bullied_tile = find_guarded_spot(unit, game_state, assigned_factory, bullies_register)
-    #
-    # if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
-    #     pass
-    #
-    # if bullied_tile is not None:
-    #     bullies_register[unit.unit_id] = bullied_tile
-    #     itin_d = make_itinerary_advanced(unit, bullied_tile, game_state, position_registry,
-    #                                      starting_turn=init_turn + actions_counter, unit_pos=unit_pos)
-    #
-    #     if itin_d["power_cost"] > unit_power:
-    #         actions.extend(wander_n_turns(unit, game_state, position_registry, assigned_factory, n_wander=1,
-    #                                       unit_pos=unit_pos, starting_turn=init_turn + actions_counter))
-    #         return actions
-    #
-    #     actions.extend(itin_d["actions"])
-    #     actions_counter += itin_d["actions_counter"]
-    #     position_registry.update(itin_d["position_registry"])
-    #     unit_pos, power_cost = itin_d["unit_pos"], itin_d["power_cost"]
-    #
-    # actions.extend(wander_n_turns(unit, game_state, position_registry, assigned_factory, n_wander=1,
-    #                               unit_pos=unit_pos, starting_turn=init_turn + actions_counter))
-    # return actions
+def attack_opponent_lichen(unit, game_state, position_registry, assigned_factory, control_area=3,
+                           starting_turn=None, unit_pos=None, unit_power=None, unit_cargo=None):
 
-    #
+    actions, actions_counter, pos_registry_new = list(), 0, dict()
+    unit_pos, unit_power, unit_cargo = get_pos_power_cargo(unit, unit_pos, unit_power, unit_cargo)
+    unit_cfg = game_state.env_cfg.ROBOTS[unit.unit_type]
+    init_turn = game_state.real_env_steps if starting_turn is None else starting_turn
+
+    scrutinised_tiles = prioritise_attack_tiles_nearby(
+        unit, game_state, position_registry, unit_pos=unit_pos, starting_turn=init_turn + actions_counter,
+        control_area=control_area)
+    for attacked_tile in scrutinised_tiles:
+        itin_d = make_itinerary_advanced(unit, attacked_tile, game_state, position_registry,
+                                         starting_turn=init_turn + actions_counter, unit_pos=unit_pos)
+        if np.array_equal(attacked_tile, itin_d["unit_pos"]) and is_registry_free(
+                init_turn + actions_counter + itin_d["actions_counter"], attacked_tile, position_registry,
+                unit.unit_id):
+            unit_pos, power_cost = itin_d["unit_pos"], itin_d["power_cost"]
+            if itin_d["power_cost"] > unit_power:
+                actions.extend(wander_n_turns(unit, game_state, position_registry, assigned_factory, n_wander=3,
+                                              unit_pos=unit_pos, starting_turn=init_turn + actions_counter))
+                return actions
+            actions.extend(itin_d["actions"])
+            position_registry.update(itin_d["position_registry"])
+            actions_counter += itin_d["actions_counter"]
+
+            # then dig
+            actions_counter += 1
+            position_registry[(init_turn + actions_counter, tuple(unit_pos))] = unit.unit_id
+            actions.extend([unit.dig(repeat=0, n=1)])
+            return actions
+    return None
+
 # def empty_cargo(unit, game_state, position_registry, assigned_factory, unit_pos=None, starting_turn=None,
 #                 anticipated_cargo=None):
 #     """
@@ -768,6 +922,7 @@ def go_bully(unit, game_state, position_registry, assigned_factory, bullies_regi
 #             position_registry.update({(init_turn + actions_counter, tuple(unit_pos)): unit.unit_id})
 #
 #     return actions
+
 
 def take_power(unit, game_state, position_registry, assigned_factory, factories_power, power_cost_move, unit_pos=None,
                unit_power=None, unit_cargo=None, starting_turn=None, n_min_digs=5, n_desired_digs=8, desired_buffer=0,

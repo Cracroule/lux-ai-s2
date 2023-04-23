@@ -81,6 +81,12 @@ def dir_to(pos_diff):
     return directions["left"]
 
 
+def delete_value_from_dict(d, v):
+    for k in list(d.keys()):
+        if d[k] == v:
+            del d[k]
+
+
 # direction (0 = center, 1 = up, 2 = right, 3 = down, 4 = left)
 # returns whether_adjacent_to_factory, dir_to_factory
 def adjacent_to_factory(pos, fact_pos):
@@ -207,22 +213,31 @@ def assess_units_main_threat(units, op_units):
     for all units, identify the main threat (the nearest unit, biggest if a tie, most power if tie)
     :return: dict my_unit_id: (op_u_id, manh_dist, op_unit.unit_type, op_unit.power)
     """
-    return {unit_id: assess_tile_main_threat(unit.pos, op_units) for unit_id, unit in units.items()}
+    return {unit_id: assess_unit_main_threat(unit, op_units) for unit_id, unit in units.items()}
 
 
-
-def assess_tile_main_threat(tile, op_units):
+def assess_unit_main_threat(unit, op_units):
     """
     identify the main threat for input tile (the nearest unit, biggest if a tie, most power if tie)
     :return: dict my_unit_id: (op_u_id, manh_dist, op_unit.unit_type, op_unit.power)
     """
     if not len(op_units):
         return None
-    dist_to_op_u = manhattan_dist_vect_point(np.array([op_u.pos for op_u in op_units.values()]), tile)
+    dist_to_op_u = manhattan_dist_vect_point(np.array([op_u.pos for op_u in op_units.values()]), unit.pos)
     threats_l = sorted([(op_u_id, dist, op_u.unit_type, op_u.power)
                         for (op_u_id, op_u), dist in zip(op_units.items(), dist_to_op_u)],
-                       key=lambda x: (x[1] if x[1] != 1 else 2, x[2] == "HEAVY", x[1], x[3]))
+                       key=lambda x: (x[1] if x[1] != 1 else 2, -(x[2] == "HEAVY"), x[1], -x[3]))
     return threats_l[0] if len(threats_l) else None
+
+
+def threat_category(my_unit, their_unit):
+    if my_unit.unit_type == "HEAVY" and their_unit.unit_type == "LIGHT":
+        return "winning"
+    elif my_unit.unit_type == "LIGHT" and their_unit.unit_type == "HEAVY":
+        return "losing"
+    elif my_unit.power >= their_unit.power:
+        return "threaten_winning"
+    return "threaten_losing"
 
 
 def is_unit_stronger(my_unit, their_unit):
@@ -277,7 +292,7 @@ def approx_factory_lichen_count(factory, game_state, obs_square_demi_size=4):
     return lichen_count
 
 
-def find_sweet_attack_spots_on_factory(op_factory, game_state, max_rubble=10, min_lichen=0,
+def find_sweet_attack_spots_on_factory(op_factory, game_state, max_rubble=50, min_lichen=0,
                                        exclude_adj_to_factory_tiles=True):
     f_x, f_y = op_factory.pos[0], op_factory.pos[1]
     all_factories_tiles = np.array([f.pos for f in game_state.factories["player_0"].values()] +
@@ -324,9 +339,10 @@ def find_sweet_rest_spots_nearby_factory(factory, game_state):
     all_factories_tiles = np.array([f.pos for f in game_state.factories["player_0"].values()] +
                                    [f.pos for f in game_state.factories["player_1"].values()])
 
-    delta_options = [(6, 3), (6, -3), (-6, 3), (-6, -3),
-                     (3, 6), (-3, 6), (3, -6), (-3, -6),
-                     (0, 7), (7, 0), (0, -7), (-7, 0)]
+    # delta_options = [(6, 3), (6, -3), (-6, 3), (-6, -3),
+    #                  (3, 6), (-3, 6), (3, -6), (-3, -6),
+    #                  (0, 7), (7, 0), (0, -7), (-7, 0)]
+    delta_options = [(6, 0), (0, 6), (-6, 0), (0, -6), (4, 4), (4, -4), (-4, 4), (-4, -4)]
 
     rest_tiles = list()
     for delta in delta_options:
@@ -430,7 +446,9 @@ def find_intermediary_spot(unit, game_state, target_pos, unit_pos=None, max_dist
 
 
 def prioritise_attack_tiles_nearby(unit, game_state, position_registry, unit_pos=None,
-                                   starting_turn=None, lichen_threshold=40, control_area=2):
+                                   starting_turn=None, lichen_threshold=None, control_area=2):
+    if lichen_threshold is None:
+        lichen_threshold = 40 if unit.unit_type == "HEAVY" else 10
     init_turn = game_state.real_env_steps if starting_turn is None else starting_turn
     unit_pos = unit.pos if unit_pos is None else unit_pos
     all_factories_tiles = np.array([f.pos for f in game_state.factories["player_0"].values()] +
@@ -455,11 +473,26 @@ def prioritise_attack_tiles_nearby(unit, game_state, position_registry, unit_pos
         if not all([is_registry_free(init_turn + i + dist_to_tile, new_pos, position_registry, unit.unit_id)
                     for i in range(2)]):
             continue
-        score = dist_to_tile * 50 - lichen_on_tile + (70 if min_dist_to_fact == 1 else 0)
+        score = dist_to_tile * 90 - lichen_on_tile + (130 if min_dist_to_fact == 1 else 0)
         attack_options.append((new_pos, score))
 
     attack_options = sorted(attack_options, key=lambda opt: opt[1])
     return [a[0] for a in attack_options]
+
+
+def get_unit_next_action_as_tuple(unit, actions):
+    try:
+        new_acts = actions[unit.unit_id]
+    except KeyError:
+        try:
+            return tuple(unit.action_queue[0])
+        except IndexError:
+            return None
+    if len(new_acts):
+        return tuple(new_acts[0])
+    else:
+        return None
+
 
 
 # def circle_factory_lichen_count(factory, game_state, obs_square_demi_size=4):

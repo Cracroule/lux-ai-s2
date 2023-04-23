@@ -8,10 +8,10 @@ from lux.kit import obs_to_game_state, GameState, EnvConfig
 from lux.utils import direction_to, my_turn_to_place_factory
 from lux.utils_raoul import manhattan_dist_vect_point, manhattan_dist_points, chebyshev_dist_points, \
     chebyshev_dist_vect_point, weighted_rubble_adjacent_density, score_rubble_tiles_to_dig, water_cost_to_end, \
-    assess_units_main_threat, is_unit_stronger, is_unit_safe, is_registry_free, find_sweet_attack_spots_on_factory, \
-    find_sweet_rest_spots_nearby_factory
-from agent_tricks import assist_adj_digging, go_adj_dig, go_to_factory, go_dig_resource, go_dig_rubble, go_resist, \
-    go_bully
+    assess_units_main_threat, is_registry_free, find_sweet_attack_spots_on_factory, \
+    find_sweet_rest_spots_nearby_factory, get_unit_next_action_as_tuple, delete_value_from_dict
+from agent_tricks import assist_adj_digging, go_adj_dig, go_to_factory, go_dig_resource, go_dig_rubble, go_bully, \
+    go_resist2, attack_opponent_lichen
 from assignments import decide_factory_regime, assign_factories_resource_tiles, \
     update_assignments, get_ideal_assignment_queue
 
@@ -20,6 +20,7 @@ from assignments import decide_factory_regime, assign_factories_resource_tiles, 
 monitored_units = []
 monitored_turns = []
 time_monitored_turns = []
+
 
 class Agent:
     def __init__(self, player: str, env_cfg: EnvConfig) -> None:
@@ -152,6 +153,8 @@ class Agent:
         all_factories = [f for f_id, f in factories.items()]
         factories_power = {f_id: f.power for f_id, f in factories.items()}
         op_player = "player_1" if self.player == "player_0" else "player_0"
+        # if game_state.real_env_steps in monitored_turns:
+        #     pass
         main_threats = assess_units_main_threat(units, game_state.units[op_player])
         cur_turn = game_state.real_env_steps
 
@@ -185,9 +188,6 @@ class Agent:
                 self.position_registry = {key: u_id for key, u_id in self.position_registry.items() if u_id != unit_id}
                 actions[unit_id] = list()
 
-        # initialise dictionary that keeps track of good tiles to dig around factories
-        # rubble_tiles_scores_per_factory = dict()  # todo: could be used as a cache for a given round to save time
-
         # associate all resources with a unique factory (refreshed only if not done or if a factory disappears)
         if self.factory_resources_map is None or \
                 any([f_id not in factories.keys() for f_id in self.factory_resources_map]):
@@ -213,7 +213,7 @@ class Agent:
                              if u_id in self.map_unit_factory.keys() and self.map_unit_factory[u_id] == factory_id}
             fact_units_assignments = {u_id: asgnmt for u_id, asgnmt in self.robots_assignments.items()
                                       if u_id in factory_units.keys()}
-            if (cur_turn % 30) == 0 or not len(self.factory_regimes):
+            if (cur_turn % 25) == 0 or not len(self.factory_regimes):
                 self.factory_regimes[factory_id] = decide_factory_regime(factory, game_state, factory_units,
                                                                          self.factory_resources_map)
             ideal_queue_per_factory[factory_id], assignment_tile_map_per_factory[factory_id] = \
@@ -223,9 +223,10 @@ class Agent:
                                                        ideal_queue_per_factory[factory_id], heavy_reassign=True)
             # delete future actions and positions so it's recomputed
             for (unit_id, updated_asgnmt) in updated_assignments_d.items():
-                if unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
-                    pass
+                # if unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
+                #     pass
                 actions[unit_id] = list()
+
             self.position_registry = {key: u_id for key, u_id in self.position_registry.items()
                                       if u_id not in updated_assignments_d.keys()}
             self.robots_assignments.update(updated_assignments_d)
@@ -247,6 +248,9 @@ class Agent:
         my_rest_tiles = list()
         for f_id, factory in game_state.factories[self.player].items():
             my_rest_tiles.extend(find_sweet_rest_spots_nearby_factory(factory, game_state))
+
+        self.bullies_register = {u_id: tile for u_id, tile in self.bullies_register.items()
+                                 if self.robots_assignments[u_id].startswith("bully_")}
 
         # maintain bully register in case of opponent factory destroyed
         for unit_id in list(self.bullies_register.keys()):
@@ -306,67 +310,6 @@ class Agent:
         unit_ids_by_priority = sorted(units.keys(), key=lambda u_id: ideal_queue_per_factory[
             self.map_unit_factory[u_id]].index(self.robots_assignments[u_id]))
 
-        # self-preservation first  (need to empty registry if we are going to run away...)
-        # self.fighting_units = list()  # reset fighting units  # todo: reset optimisation
-        for unit_id in unit_ids_by_priority:
-            unit = units[unit_id]
-            unit_cfg = game_state.env_cfg.ROBOTS[unit.unit_type]
-            assigned_factory = factories[self.map_unit_factory[unit_id]]
-            assignment = self.robots_assignments[unit_id]
-            dist_to_factory = chebyshev_dist_points(assigned_factory.pos, unit.pos)
-            if main_threats[unit_id] is not None:
-                dist_to_threat = main_threats[unit_id][1]
-                is_stronger = is_unit_stronger(unit, game_state.units[op_player][main_threats[unit_id][0]])
-                if dist_to_threat <= 2 and (not is_stronger) and "_assist_" not in assignment:
-                    if dist_to_factory > 1:
-                        # ALLO HOUSTON, we have a problem,  # RUN FOR YOU LIFE, LITTLE ROBOT
-                        self.position_registry = {k: u_id for k, u_id in self.position_registry.items()
-                                                  if u_id != unit_id}  # remove plan, make another one
-                        actions[unit_id] = go_to_factory(unit, game_state, self.position_registry, assigned_factory)
-                    else:
-                        is_spot_free = is_registry_free(cur_turn + 1, unit.pos, self.position_registry, unit.unit_id)
-                        if (is_spot_free and ((len(unit.action_queue) and (unit.action_queue[0][0] != 5)) or
-                                              (not len(unit.action_queue)))):
-                            # if on factory tile and not already charging, charge
-                            actions[unit_id] = [unit.recharge(unit_cfg.BATTERY_CAPACITY)]
-                        else:
-                            pass  # wtf do we do if someone else booked that place? :(
-                            # can we do NOTHING ? does it crash? # todo: test somehow
-                    self.fighting_units.append(unit_id)
-                    # if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
-                    #     pass
-
-        # kick some butts next  (take precedence over other units moves)
-        # self.fighting_units = list()  # reset fighting units  # todo: reset optimisation
-        for unit_id in unit_ids_by_priority:
-            unit = units[unit_id]
-            assigned_factory = factories[self.map_unit_factory[unit_id]]
-            assignment = self.robots_assignments[unit_id]
-            if main_threats[unit_id] is not None:
-                dist_to_threat = main_threats[unit_id][1]
-                op_unit = game_state.units[op_player][main_threats[unit_id][0]]
-                is_stronger, is_safe = is_unit_stronger(unit, op_unit), is_unit_safe(unit, op_unit)
-                if dist_to_threat <= 2 and is_stronger and not is_safe and "_assist_" not in assignment:  # KILL!
-                    # self.fighting_units.append(unit_id)  # need to know we're fighting to stop weird moves after?
-                    self.position_registry = {k: u_id for k, u_id in self.position_registry.items()
-                                              if u_id != unit_id}  # remove plan, make another one
-                    actions[unit_id] = go_resist(unit, game_state, self.position_registry, op_unit, assigned_factory,
-                                                 main_threats[unit_id])
-                    self.fighting_units.append(unit_id)
-                    # if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
-                    #     pass
-                # else, if weaker but have a chance if opponent does not move, we also go for it
-                elif dist_to_threat == 1 and unit.unit_type == op_unit.unit_type and \
-                        not is_safe and "_assist_" not in assignment:  # KILL!
-                    # self.fighting_units.append(unit_id)  # need to know we're fighting to stop weird moves after?
-                    self.position_registry = {k: u_id for k, u_id in self.position_registry.items()
-                                              if u_id != unit_id}  # remove plan, make another one
-                    actions[unit_id] = go_resist(unit, game_state, self.position_registry, op_unit, assigned_factory,
-                                                 main_threats[unit_id], allow_weaker=True)
-                    self.fighting_units.append(unit_id)
-                    # if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
-                    #     pass
-
         # fo all the other units moves
         for unit_id in unit_ids_by_priority:
 
@@ -398,10 +341,6 @@ class Agent:
 
             if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
                 pass
-
-            # is_unit_busy = len(unit.action_queue) and \
-            #                tuple(unit.action_queue[0]) != unit.recharge(unit_cfg.BATTERY_CAPACITY) and \
-            #                not (unit_id in actions.keys() and len(actions[unit_id]) == 0)
 
             is_unit_reset = unit_id in actions.keys() and len(actions[unit_id]) == 0
             is_unit_busy = len(unit.action_queue) and (not is_unit_reset) and (not is_unit_charging)
@@ -503,9 +442,45 @@ class Agent:
             local_time = str(end_time - start_time)
             pass
 
-        # for u_id, action_queue in actions.items():
-        # if game_state.real_env_steps >= 6:
-        #     pass
+        ################################################################################
+        #              END GAME AGGRESSIVITY
+        ################################################################################
+        for unit_id in unit_ids_by_priority:
+            unit = units[unit_id]
+            assignment = self.robots_assignments[unit_id]
+            assigned_factory = factories[self.map_unit_factory[unit_id]]
+            unit_cfg = game_state.env_cfg.ROBOTS[unit.unit_type]
+            should_fight = unit.power >= (1000 - game_state.real_env_steps) * (
+                    unit_cfg.DIG_COST + unit_cfg.MOVE_COST) / 2.3
+            if not assignment.startswith("bully_") and should_fight:
+                attack_lichen_options = attack_opponent_lichen(
+                    unit, game_state, self.position_registry, assigned_factory, control_area=4)
+                if attack_lichen_options is not None:
+                    # very ugly code, because we've been lazy with hypothetical moves in agent_tricks
+                    # we need to delete the registry if we actually want to fight and cancel previous plan
+                    delete_value_from_dict(self.position_registry, unit_id)
+                    attack_lichen_options = attack_opponent_lichen(
+                        unit, game_state, self.position_registry, assigned_factory, control_area=4)
+                    actions[unit_id] = attack_lichen_options
+
+        #################################################################################
+        #               UNITS DEFENSE
+        #################################################################################
+
+        for unit_id in unit_ids_by_priority[::-1]:
+            if main_threats[unit_id] is not None and main_threats[unit_id][1] <= 2:
+                unit = units[unit_id]
+                next_unit_action = get_unit_next_action_as_tuple(unit, actions)
+                # unit_cfg = game_state.env_cfg.ROBOTS[unit.unit_type]
+                # assignment = self.robots_assignments[unit_id]
+                assigned_factory = factories[self.map_unit_factory[unit_id]]
+                threat_unit = game_state.units[op_player][main_threats[unit_id][0]]
+                dist_to_threat = main_threats[unit_id][1]
+                resist_actions = go_resist2(unit, game_state, self.position_registry, threat_unit,
+                                            assigned_factory, dist_to_threat, next_unit_action)
+                if resist_actions is not None:
+                    actions[unit_id] = resist_actions
+                    self.fighting_units.append(unit_id)
 
         #################################################################################
         #               FACTORY WATERING
@@ -516,7 +491,7 @@ class Agent:
                 continue  # we already make a unit, can't water this turn
 
             current_water_cost = max(factory.water_cost(game_state), 1)
-            projected_total_cost = water_cost_to_end(current_water_cost, 1000 - cur_turn, increase_rate=0.015) + 10
+            projected_total_cost = water_cost_to_end(current_water_cost, 1000 - cur_turn, increase_rate=0.015) + 5
             if factory.cargo.water > projected_total_cost and cur_turn > 300:
                 actions[f_id] = factory.water()
             elif factory.cargo.water > 200 and ((step % 2) == 0 or (step % 11) == 0):
