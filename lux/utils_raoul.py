@@ -302,8 +302,8 @@ def find_sweet_attack_spots_on_factory(op_factory, game_state, max_rubble=50, mi
     # [(occupied_tile), (if_resources_here)]
     resources_t = [[(f_x-3, f_y-1), (f_x-2, f_y-1)], [(f_x-3, f_y), (f_x-2, f_y)], [(f_x-3, f_y+1), (f_x-2, f_y+1)],
                    [(f_x+3, f_y-1), (f_x+2, f_y-1)], [(f_x+3, f_y), (f_x+2, f_y)], [(f_x+3, f_y+1), (f_x+2, f_y+1)],
-                   [(f_x-1, f_y-3), (f_x-1, f_y-2)], [(f_x, f_y-3), (f_x, f_y-2)], [(f_x+1, f_y-3), (f_x+1, f_y-3)],
-                   [(f_x-1, f_y+3), (f_x-1, f_y+2)], [(f_x, f_y+3), (f_x, f_y+2)], [(f_x+1, f_y+3), (f_x+1, f_y+3)]]
+                   [(f_x-1, f_y-3), (f_x-1, f_y-2)], [(f_x, f_y-3), (f_x, f_y-2)], [(f_x+1, f_y-3), (f_x+1, f_y-2)],
+                   [(f_x-1, f_y+3), (f_x-1, f_y+2)], [(f_x, f_y+3), (f_x, f_y+2)], [(f_x+1, f_y+3), (f_x+1, f_y+2)]]
 
     attack_tiles_resources = list()
     for t_main, t_dep in resources_t:
@@ -448,7 +448,7 @@ def find_intermediary_spot(unit, game_state, target_pos, unit_pos=None, max_dist
 def prioritise_attack_tiles_nearby(unit, game_state, position_registry, unit_pos=None,
                                    starting_turn=None, lichen_threshold=None, control_area=2):
     if lichen_threshold is None:
-        lichen_threshold = 40 if unit.unit_type == "HEAVY" else 10
+        lichen_threshold = 40 if unit.unit_type == "HEAVY" else 1
     init_turn = game_state.real_env_steps if starting_turn is None else starting_turn
     unit_pos = unit.pos if unit_pos is None else unit_pos
     all_factories_tiles = np.array([f.pos for f in game_state.factories["player_0"].values()] +

@@ -1,5 +1,6 @@
 import collections
 import numpy as np
+import random
 import time
 import scipy
 import sys
@@ -9,7 +10,8 @@ from lux.utils import direction_to, my_turn_to_place_factory
 from lux.utils_raoul import manhattan_dist_vect_point, manhattan_dist_points, chebyshev_dist_points, \
     chebyshev_dist_vect_point, weighted_rubble_adjacent_density, score_rubble_tiles_to_dig, water_cost_to_end, \
     assess_units_main_threat, is_registry_free, find_sweet_attack_spots_on_factory, \
-    find_sweet_rest_spots_nearby_factory, get_unit_next_action_as_tuple, delete_value_from_dict
+    find_sweet_rest_spots_nearby_factory, get_unit_next_action_as_tuple, delete_value_from_dict, \
+    manh_dist_to_factory_points, manh_dist_to_factory_vect_point
 from agent_tricks import assist_adj_digging, go_adj_dig, go_to_factory, go_dig_resource, go_dig_rubble, go_bully, \
     go_resist2, attack_opponent_lichen
 from assignments import decide_factory_regime, assign_factories_resource_tiles, \
@@ -21,12 +23,16 @@ monitored_units = []
 monitored_turns = []
 time_monitored_turns = []
 
+max_distance_to_exploit_ore = 10
+max_distance_to_exploit_ice = 5
+
 
 class Agent:
     def __init__(self, player: str, env_cfg: EnvConfig) -> None:
         self.player = player
         self.opp_player = "player_1" if self.player == "player_0" else "player_0"
         np.random.seed(0)
+        random.seed(0)
         self.env_cfg: EnvConfig = env_cfg
 
         self.faction_names = {
@@ -54,13 +60,14 @@ class Agent:
         if step == 0:
             # Declare faction
             actions['faction'] = self.faction_names[self.player]
-            actions['bid'] = 0  # Learnable
+            actions['bid'] = 0 if self.player == "player_0" else 1  # to do: try different things here
         else:
             # Factory placement period
             # optionally convert observations to python objects with utility functions
             game_state = obs_to_game_state(step, self.env_cfg, obs)
-            opp_factories = [f.pos for _, f in game_state.factories[self.opp_player].items()]
-            my_factories = [f.pos for _, f in game_state.factories[self.player].items()]
+            op_factory_tiles = [f.pos for _, f in game_state.factories[self.opp_player].items()]
+            my_factory_tiles = [f.pos for _, f in game_state.factories[self.player].items()]
+            all_factory_tiles = op_factory_tiles + my_factory_tiles
 
             # how much water and metal you have in your starting pool to give to new factories
             water_left = game_state.teams[self.player].water
@@ -78,48 +85,72 @@ class Agent:
                 ice_tile_locations = np.argwhere(ice_map == 1)  # numpy position of every ice tile
                 ore_tile_locations = np.argwhere(ore_map == 1)  # numpy position of every ice tile
 
-                min_score = 10e6
+                best_score = (False, -1)
                 best_loc = potential_spawns[0]
-
-                d_rubble = 10
 
                 for loc in potential_spawns:
 
-                    # ice_tile_distances = np.mean((ice_tile_locations - loc) ** 2, 1)
-                    # ore_tile_distances = np.mean((ore_tile_locations - loc) ** 2, 1)
+                    score_ice, ice_count = 0, 0
+                    sorted_ice_tiles = sorted(ice_tile_locations, key=lambda t: manh_dist_to_factory_points(t, loc))
+                    # sorted_ice_dist = sorted(manh_dist_to_factory_vect_point(ice_tile_locations, loc))
+                    bonus_ice_adj = False
+                    for ice_tile in sorted_ice_tiles:
+                        multiplier = 1.
+                        ice_dist = manh_dist_to_factory_points(ice_tile, loc)
+                        if len(my_factory_tiles):
+                            others_ice_dist = manh_dist_to_factory_vect_point(np.array(my_factory_tiles), ice_tile)
+                            if np.min(others_ice_dist) <= ice_dist:
+                                multiplier = 0.1  # will actually be considered as another factory's tile!
+                        if len(op_factory_tiles):
+                            others_ice_dist = manh_dist_to_factory_vect_point(np.array(op_factory_tiles), ice_tile)
+                            if np.min(others_ice_dist) < ice_dist:
+                                multiplier = 0.7  # will actually be considered as another factory's tile!
 
-                    # ice_dist = sorted(set(manhattan_dist_vect_point(ice_tile_locations, loc)))
-                    # ice_dist = sorted(manhattan_dist_vect_point(ice_tile_locations, loc))
-                    # ice_dist = sorted(chebyshev_dist_vect_point(ice_tile_locations, loc))
+                        ice_count += 1
+                        if ice_count > 3 or ice_dist > max_distance_to_exploit_ice:
+                            break
+                        score = 0.3 + 0.7 * (max_distance_to_exploit_ice - ice_dist + 1) / max_distance_to_exploit_ice
+                        if ice_dist == 1:
+                            score_ice += 0.5 if not bonus_ice_adj else 0.15  # only give the full bonus once
+                            bonus_ice_adj = True
+                        score_ice += multiplier * score * (1 if ice_count < 3 else 0.4)
 
-                    # reflect best the need to be adjacent to a water tile when possible
-                    custom_made_dist = np.floor(
-                        (manhattan_dist_vect_point(ice_tile_locations, loc) +
-                         chebyshev_dist_vect_point(ice_tile_locations, loc)) / 2).astype(int)
-                    ice_dist = sorted(custom_made_dist)
 
-                    nearest_ice_dist, second_nearest_ice_dist = ice_dist[0], ice_dist[1]
-                    nearest_ore_dist = np.min(manhattan_dist_vect_point(ore_tile_locations, loc))
 
-                    if 10 * nearest_ice_dist > min_score:
-                        continue  # skip exploration of too crappy tiles
+                    if score_ice < 0.3 and best_score[1] > 0:
+                        continue  # bad location, let's keep moving
+
+                    score_ore, ore_count = 0, 0
+                    sorted_ore_tiles = sorted(ore_tile_locations, key=lambda t: manh_dist_to_factory_points(t, loc))
+                    bonus_ore_adj = False
+                    for ore_tile in sorted_ore_tiles:
+                        multiplier = 1.
+                        ore_dist = manh_dist_to_factory_points(ore_tile, loc)
+                        if len(my_factory_tiles):
+                            others_ore_dist = manh_dist_to_factory_vect_point(np.array(my_factory_tiles), ore_tile)
+                            if np.min(others_ore_dist) <= ore_dist:
+                                multiplier = 0.1  # will actually be considered as another factory's tile!
+                        if len(op_factory_tiles):
+                            others_ore_dist = manh_dist_to_factory_vect_point(np.array(op_factory_tiles), ore_tile)
+                            if np.min(others_ore_dist) < ore_dist:
+                                multiplier = 0.7  # will actually be considered as another factory's tile!
+
+                        ore_count += 1
+                        if ore_count > 3 or ore_dist > max_distance_to_exploit_ore:
+                            break
+                        score = 0.3 + 0.7 * (max_distance_to_exploit_ore - ore_dist + 1) / max_distance_to_exploit_ore
+                        if ore_dist == 1:
+                            score_ore += 0.5 if not bonus_ore_adj else 0.15  # only give the full bonus once
+                            bonus_ore_adj = True
+                        score_ore += multiplier * score * (1 if ore_count < 3 else 0.4)
 
                     density_rubble = weighted_rubble_adjacent_density(obs["board"]["rubble"], loc)
+                    mixed_score = 0.8 * score_ice * (score_ore + 0.2) - density_rubble / 100 * 0.9
+                    ore_score = score_ore - density_rubble / 100 * 0.8
+                    tile_score = (score_ice >= 1, mixed_score) if score_ice >= 1 else (score_ice >= 1, ore_score)
 
-                    closes_opp_factory_dist = 0
-                    if len(opp_factories) >= 1:
-                        closes_opp_factory_dist = np.min(manhattan_dist_vect_point(np.array(opp_factories), loc))
-                    closes_my_factory_dist = 0
-                    if len(my_factories) >= 1:
-                        closes_my_factory_dist = np.min(manhattan_dist_vect_point(np.array(opp_factories), loc))
-
-                    score = 10 * nearest_ice_dist + 0.2 * second_nearest_ice_dist +\
-                            1. * nearest_ore_dist + \
-                            0.3 * density_rubble - \
-                            0.1 * closes_opp_factory_dist + 0.1 * closes_my_factory_dist
-
-                    if score < min_score:
-                        min_score = score
+                    if tile_score > best_score:
+                        best_score = tile_score
                         best_loc = loc
 
                 #                 spawn_loc = potential_spawns[np.random.randint(0, len(potential_spawns))]
@@ -129,13 +160,107 @@ class Agent:
                 #                 actions['water']=water_left
                 # actions['metal'] = min(300, metal_left)
                 # actions['water'] = min(300, water_left)
-                actions["metal"] = min(int(1.0 * metal_left / factories_to_place), metal_left)
-                actions["water"] = min(int(1.0 * water_left / factories_to_place), water_left)
+                # actions["metal"] = min(int(1.0 * metal_left / factories_to_place), metal_left)
+                # actions["water"] = min(int(1.0 * water_left / factories_to_place), water_left)
+                actions['metal'] = min(150, metal_left)
+                actions['water'] = min(150, water_left)
 
                 # actions["metal"] = min(max(min(metal_left - 100 * factories_to_place, 200), 100), metal_left)
                 # actions["water"] = min(int(1.1 * water_left / factories_to_place), water_left)
 
         return actions
+    #
+    # def early_setup_old(self, step: int, obs, remainingOverageTime: int = 60):
+    #     """
+    #     Early Phase
+    #     """
+    #
+    #     actions = dict()
+    #     if step == 0:
+    #         # Declare faction
+    #         actions['faction'] = self.faction_names[self.player]
+    #         actions['bid'] = 0  # Learnable
+    #     else:
+    #         # Factory placement period
+    #         # optionally convert observations to python objects with utility functions
+    #         game_state = obs_to_game_state(step, self.env_cfg, obs)
+    #         opp_factories = [f.pos for _, f in game_state.factories[self.opp_player].items()]
+    #         my_factories = [f.pos for _, f in game_state.factories[self.player].items()]
+    #
+    #         # how much water and metal you have in your starting pool to give to new factories
+    #         water_left = game_state.teams[self.player].water
+    #         metal_left = game_state.teams[self.player].metal
+    #
+    #         # how many factories you have left to place
+    #         factories_to_place = game_state.teams[self.player].factories_to_place
+    #         my_turn_to_place = my_turn_to_place_factory(game_state.teams[self.player].place_first, step)
+    #         if factories_to_place > 0 and my_turn_to_place:
+    #             # we will spawn our factory in a random location with 100 metal n water (learnable)
+    #             potential_spawns = np.array(list(zip(*np.where(obs["board"]["valid_spawns_mask"] == 1))))
+    #
+    #             ice_map = game_state.board.ice
+    #             ore_map = game_state.board.ore
+    #             ice_tile_locations = np.argwhere(ice_map == 1)  # numpy position of every ice tile
+    #             ore_tile_locations = np.argwhere(ore_map == 1)  # numpy position of every ice tile
+    #
+    #             min_score = 10e6
+    #             best_loc = potential_spawns[0]
+    #
+    #             d_rubble = 10
+    #
+    #             for loc in potential_spawns:
+    #
+    #                 # ice_tile_distances = np.mean((ice_tile_locations - loc) ** 2, 1)
+    #                 # ore_tile_distances = np.mean((ore_tile_locations - loc) ** 2, 1)
+    #
+    #                 # ice_dist = sorted(set(manhattan_dist_vect_point(ice_tile_locations, loc)))
+    #                 # ice_dist = sorted(manhattan_dist_vect_point(ice_tile_locations, loc))
+    #                 # ice_dist = sorted(chebyshev_dist_vect_point(ice_tile_locations, loc))
+    #
+    #                 # reflect best the need to be adjacent to a water tile when possible
+    #                 custom_made_dist = np.floor(
+    #                     (manhattan_dist_vect_point(ice_tile_locations, loc) +
+    #                      chebyshev_dist_vect_point(ice_tile_locations, loc)) / 2).astype(int)
+    #                 ice_dist = sorted(custom_made_dist)
+    #
+    #                 nearest_ice_dist, second_nearest_ice_dist = ice_dist[0], ice_dist[1]
+    #                 nearest_ore_dist = np.min(manhattan_dist_vect_point(ore_tile_locations, loc))
+    #
+    #                 if 10 * nearest_ice_dist > min_score:
+    #                     continue  # skip exploration of too crappy tiles
+    #
+    #                 density_rubble = weighted_rubble_adjacent_density(obs["board"]["rubble"], loc)
+    #
+    #                 closes_opp_factory_dist = 0
+    #                 if len(opp_factories) >= 1:
+    #                     closes_opp_factory_dist = np.min(manhattan_dist_vect_point(np.array(opp_factories), loc))
+    #                 closes_my_factory_dist = 0
+    #                 if len(my_factories) >= 1:
+    #                     closes_my_factory_dist = np.min(manhattan_dist_vect_point(np.array(opp_factories), loc))
+    #
+    #                 score = 10 * nearest_ice_dist + 0.2 * second_nearest_ice_dist +\
+    #                         1. * nearest_ore_dist + \
+    #                         0.3 * density_rubble - \
+    #                         0.1 * closes_opp_factory_dist + 0.1 * closes_my_factory_dist
+    #
+    #                 if score < min_score:
+    #                     min_score = score
+    #                     best_loc = loc
+    #
+    #             #                 spawn_loc = potential_spawns[np.random.randint(0, len(potential_spawns))]
+    #             spawn_loc = best_loc
+    #             actions['spawn'] = spawn_loc
+    #             #                 actions['metal']=metal_left
+    #             #                 actions['water']=water_left
+    #             # actions['metal'] = min(300, metal_left)
+    #             # actions['water'] = min(300, water_left)
+    #             actions["metal"] = min(int(1.0 * metal_left / factories_to_place), metal_left)
+    #             actions["water"] = min(int(1.0 * water_left / factories_to_place), water_left)
+    #
+    #             # actions["metal"] = min(max(min(metal_left - 100 * factories_to_place, 200), 100), metal_left)
+    #             # actions["water"] = min(int(1.1 * water_left / factories_to_place), water_left)
+    #
+    #     return actions
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
         actions = dict()
@@ -214,8 +339,10 @@ class Agent:
             fact_units_assignments = {u_id: asgnmt for u_id, asgnmt in self.robots_assignments.items()
                                       if u_id in factory_units.keys()}
             if (cur_turn % 25) == 0 or not len(self.factory_regimes):
-                self.factory_regimes[factory_id] = decide_factory_regime(factory, game_state, factory_units,
-                                                                         self.factory_resources_map)
+                self.factory_regimes[factory_id] = decide_factory_regime(
+                    factory, game_state, factory_units, self.factory_resources_map,
+                    max_distance_to_exploit_ore=max_distance_to_exploit_ore,
+                    max_distance_to_exploit_ice=max_distance_to_exploit_ice)
             ideal_queue_per_factory[factory_id], assignment_tile_map_per_factory[factory_id] = \
                 get_ideal_assignment_queue(factory, game_state, self.factory_resources_map,
                                            self.factory_regimes[factory_id])
@@ -311,33 +438,26 @@ class Agent:
             self.map_unit_factory[u_id]].index(self.robots_assignments[u_id]))
 
         # fo all the other units moves
+        reset_unit_ids = list()
         for unit_id in unit_ids_by_priority:
-
-            if unit_id in self.fighting_units:
-                continue  # already handled above!
 
             if game_state.real_env_steps in time_monitored_turns:
                 start_time = time.time()
 
             unit = units[unit_id]
-            # for unit_id, unit in units.items():
             unit_cfg = game_state.env_cfg.ROBOTS[unit.unit_type]
             assignment = self.robots_assignments[unit_id]
             assigned_factory = factories[self.map_unit_factory[unit_id]]
+
+            if unit_id in reset_unit_ids:
+                # the unit has been reset by someone else to steal a tile... have to find something to do again...
+                actions[unit_id] = list()
+
             is_unit_charging = len(unit.action_queue) and tuple(unit.action_queue[0]) == tuple(
                 unit.recharge(unit_cfg.BATTERY_CAPACITY))
-
             if is_unit_charging:
                 # we pre-booked the cell for n more turns, we free it now (will be rebooked instantly if still relevant)
-                i = 1
-                while True:
-                    try:
-                        if self.position_registry[(cur_turn + i, tuple(unit.pos))] != unit_id:
-                            break
-                        del self.position_registry[(cur_turn + i, tuple(unit.pos))]
-                        i += 1
-                    except KeyError:
-                        break
+                delete_value_from_dict(self.position_registry, unit_id)
 
             if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
                 pass
@@ -375,6 +495,8 @@ class Agent:
                             f.write(str(game_state.real_env_steps) + "[" + str(unit_id) + "]: " + local_time + "\n")
                         pass
                 continue  # stop here if already have some actions to do
+
+            # so unit is not busy, let's do something
             elif unit_id not in actions.keys():
                 actions[unit_id] = list()
 
@@ -408,8 +530,8 @@ class Agent:
             elif assignment.startswith("ore_solo") or assignment.startswith("water_solo"):
                 dug_tile = assignment_tile_map_per_factory[self.map_unit_factory[unit_id]][assignment]
                 actions[unit_id].extend(go_dig_resource(
-                    unit, game_state, self.position_registry, dug_tile, assigned_factory=assigned_factory,
-                    factories_power=factories_power))
+                    unit, game_state, self.position_registry, dug_tile, assigned_factory, factories_power,
+                    unit_ids_by_priority, reset_unit_ids))
             elif assignment.startswith("dig_rubble"):
                 # tiles_scores = score_rubble_tiles_to_dig(game_state, assigned_factory)
                 actions[unit_id].extend(go_dig_rubble(
@@ -466,7 +588,6 @@ class Agent:
         #################################################################################
         #               UNITS DEFENSE
         #################################################################################
-
         for unit_id in unit_ids_by_priority[::-1]:
             if main_threats[unit_id] is not None and main_threats[unit_id][1] <= 2:
                 unit = units[unit_id]
@@ -477,15 +598,31 @@ class Agent:
                 threat_unit = game_state.units[op_player][main_threats[unit_id][0]]
                 dist_to_threat = main_threats[unit_id][1]
                 resist_actions = go_resist2(unit, game_state, self.position_registry, threat_unit,
-                                            assigned_factory, dist_to_threat, next_unit_action)
+                                            assigned_factory, dist_to_threat, next_unit_action, factories_power)
                 if resist_actions is not None:
                     actions[unit_id] = resist_actions
                     self.fighting_units.append(unit_id)
 
         #################################################################################
+        #               LAST TURNS 'CHEESE'
+        #################################################################################
+        for unit_id in unit_ids_by_priority:
+            unit = units[unit_id]
+            unit_cfg = game_state.env_cfg.ROBOTS[unit.unit_type]
+            lichen_on_tile = game_state.board.lichen[unit.pos[0], unit.pos[1]]
+            op_strain_ids = [f.strain_id for f in game_state.factories[op_player].values()]
+            if cur_turn in [998, 999] and lichen_on_tile > 0 and \
+                    game_state.board.lichen_strains[unit.pos[0], unit.pos[1]] in op_strain_ids:
+                if unit.power > unit_cfg.SELF_DESTRUCT_COST + unit_cfg.ACTION_QUEUE_POWER_COST:
+                    if unit.unit_type == "HEAVY" and cur_turn == 998:
+                        continue  # edge case, unit could be useful twice...
+                    actions[unit_id] = [unit.self_destruct()]  # BOOM!
+                elif unit.power > unit_cfg.DIG_COST + unit_cfg.ACTION_QUEUE_POWER_COST:
+                    actions[unit_id] = [unit.dig(1)]
+
+        #################################################################################
         #               FACTORY WATERING
         #################################################################################
-
         for f_id, factory in factories.items():
             if f_id in actions.keys() or not factory.can_water(game_state):
                 continue  # we already make a unit, can't water this turn
@@ -509,19 +646,19 @@ class Agent:
                     actions[f_id] = factory.water()
                     # unsure about that one... should at least check if the water is currently dug, i.e. unit on tile
 
-
-        # safe mode: ON
-        # valid_actions = {u_id: acts for u_id, acts in actions.items() if u_id in factories.keys() or
-        #                  (u_id not in factories.keys() and not tuple("DO_NOTHING_TAG") == tuple(acts[0]))}
-
         # cheap action optimiser!
         for u_id in list(actions.keys()):
             if u_id in factories.keys():
                 continue  # (special because not iterable...)
+            if len(actions[u_id]) > 20:
+                actions[u_id] = actions[u_id][:20]
+            elif len(actions[u_id]) < 19:  # small optim; attempt to plan next round
+                if actions[u_id][-1][0] != 5 and all([act[-2] == 0 for act in actions[u_id]]):
+                    # not ending by charge, no repeat in the loop: we add a charge at the end (i.e. most likely outcome)
+                    unit, unit_cfg = units[u_id], game_state.env_cfg.ROBOTS[units[u_id].unit_type]
+                    actions[u_id].extend([unit.recharge(unit_cfg.BATTERY_CAPACITY)])
             if tuple(tuple(a) for a in actions[u_id]) == tuple(tuple(a) for a in units[u_id].action_queue):
                 del actions[u_id]
-            elif len(actions[u_id]) > 20:
-                actions[u_id] = actions[u_id][:20]
 
         if cur_turn in monitored_turns:
             pass

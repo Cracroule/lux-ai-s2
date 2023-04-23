@@ -190,6 +190,13 @@ def assist_adj_digging(unit, game_state, position_registry, assisted_unit, assig
         position_registry.update(itin_d["position_registry"])
         return actions
 
+    # we should stay there and be an assistant... but maybe another robot had the bad idea of using that tile already...
+    if not all([is_registry_free(init_turn + actions_counter + 1 + i, unit_pos, position_registry, unit.unit_id)
+                for i in range(2)]):
+        actions.extend(wander_n_turns(unit, game_state, position_registry, assigned_factory, n_wander=2,
+                                      unit_pos=unit_pos, starting_turn=init_turn + actions_counter))
+        return actions
+
     # theoretically from here, the unit will keep digging and transferring forever, thus not moving unless interrupted
     # a bit dodgy as could be reassigned, but in such case the registry should be updated ... hopefully...
     # for turn in range(init_turn + actions_counter + 1, 1000 + 1):
@@ -246,8 +253,8 @@ def assist_adj_digging(unit, game_state, position_registry, assisted_unit, assig
 
 
 # to be used on ice or ore
-def go_dig_resource(unit, game_state, position_registry, target_dug_tile, assigned_factory, factories_power, n_min_digs=5,
-                    n_desired_digs=8):
+def go_dig_resource(unit, game_state, position_registry, target_dug_tile, assigned_factory, factories_power,
+                    unit_ids_by_priority, reset_unit_ids, n_min_digs=5, n_desired_digs=8):
     """
     - [move if in the middle of the factory and stop actions there]
     - [pick unit_power]
@@ -297,17 +304,19 @@ def go_dig_resource(unit, game_state, position_registry, target_dug_tile, assign
     dist = manhattan_dist_points(unit_pos, target_dug_tile)
     nb_rubble = 60  # proxy rubble for simplicity, should check actual rubble on map
     power_cost_move = int(2 * dist * (unit_cfg.MOVE_COST + unit_cfg.RUBBLE_MOVEMENT_COST * nb_rubble))
-    desired_buffer = int(unit_cfg.BATTERY_CAPACITY / 30)
+    # desired_buffer = int(unit_cfg.BATTERY_CAPACITY / 30)
 
     # # itinerary computation made before, so we know how much it costs to get there
     # TODO: care: it's assumed to be the same cost to come back to the factory (x2 factor ), which might be VERY wrong\
     # TODO: could use proxy to compute the cost... can't use itinerary, because we might take unit_power, which
     #       f*cks up the position registry because we're then late by one turn
-    # itin_d = make_itinerary_advanced(unit, target_dug_tile, game_state, position_registry,
-    #                                  starting_turn=init_turn + actions_counter, unit_pos=unit_pos)
+    itin_d = make_itinerary_advanced(unit, target_dug_tile, game_state, position_registry,
+                                     starting_turn=init_turn + actions_counter, unit_pos=unit_pos)
+    itin_d2 = make_itinerary_advanced(unit, target_dug_tile, game_state, position_registry,
+                                      starting_turn=init_turn + actions_counter + 1, unit_pos=unit_pos)
     # unit_pos_after_moving, power_cost = itin_d["unit_pos"], itin_d["power_cost"]
-    # power_cost_move = 2 * power_cost
-    # desired_buffer = int(unit_cfg.BATTERY_CAPACITY / 30)
+    power_cost_move = max(power_cost_move, 2 * max(itin_d["power_cost"], itin_d2["power_cost"]))
+    desired_buffer = int(unit_cfg.BATTERY_CAPACITY / 30)
 
     # pick power if necessary
     res = take_power(unit, game_state, position_registry, assigned_factory, factories_power, power_cost_move, unit_pos,
@@ -339,9 +348,32 @@ def go_dig_resource(unit, game_state, position_registry, target_dug_tile, assign
 
     # dig
     # TODO: improve power computation
-    n_dig_eventually = int(np.floor(0.9 * (unit_power - power_cost_move/2) / unit_cfg.DIG_COST))
+    n_dig_eventually = max(int(np.floor(0.9 * (unit_power - power_cost_move/2) / unit_cfg.DIG_COST)), 1)
     actions.extend([unit.dig(repeat=0, n=n_dig_eventually)])
     unit_power -= unit_cfg.DIG_COST * n_dig_eventually
+
+    dig_availability = [is_registry_free(init_turn + actions_counter + i + 1, target_dug_tile,
+                                         position_registry, unit.unit_id) for i in range(n_dig_eventually)]
+    availability_i, units_can_reset = 0, list()
+    while availability_i < len(dig_availability):
+        if not dig_availability[availability_i]:
+            meh_u_id = position_registry[(init_turn + actions_counter + availability_i + 1, tuple(target_dug_tile))]
+            if unit_ids_by_priority.index(unit.unit_id) > unit_ids_by_priority.index(meh_u_id):
+                break  # a more important robot occupies the tile... we'll not be able to do so
+            else:
+                units_can_reset.append(meh_u_id)
+        availability_i += 1
+
+    if availability_i < n_dig_eventually / 2:
+        actions.extend(wander_n_turns(unit, game_state, position_registry, assigned_factory, n_wander=3,
+                                      unit_pos=unit_pos, starting_turn=init_turn + actions_counter))
+        return actions
+    else:
+        n_dig_eventually = availability_i  # accept to potentially reduce digging :(
+        for reset_u_id in units_can_reset:
+            delete_value_from_dict(position_registry, reset_u_id)
+            reset_unit_ids.append(reset_u_id)
+
     for i in range(n_dig_eventually):
         actions_counter += 1
         position_registry.update({(init_turn + actions_counter, tuple(unit_pos)): unit.unit_id})
@@ -413,9 +445,6 @@ def go_dig_rubble(unit, game_state, position_registry, assigned_factory, factori
     nb_rubble = 60  # proxy rubble for simplicity, should check actual rubble on map
     power_cost_move = int((dist + dist2) * (unit_cfg.MOVE_COST + unit_cfg.RUBBLE_MOVEMENT_COST * nb_rubble))
     desired_buffer = int(unit_cfg.BATTERY_CAPACITY / 30)
-
-    # if game_state.real_env_steps >= 99 and unit.unit_id == "unit_38":
-    #     pass
 
     # # itinerary computation made before, so we know how much it costs to get there
     # TODO: care: it's assumed to be the same cost to come back to the factory (x2 factor), which might be VERY wrong
@@ -580,6 +609,7 @@ def go_resist2(unit, game_state, position_registry, op_unit, assigned_factory, t
                 is_registry_free(init_turn + actions_counter + 1, unit_pos, position_registry, unit.unit_id):
             actions_counter += 1
             position_registry[(init_turn + actions_counter, tuple(unit_pos))] = unit.unit_id
+            factories_power[assigned_factory.unit_id] -= needed_power_to_dominate
             actions.extend([unit.pickup(4, needed_power_to_dominate)])
 
     if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
@@ -619,8 +649,12 @@ def go_resist2(unit, game_state, position_registry, op_unit, assigned_factory, t
                 op_directions.append(get_direction_code_from_delta((0, int(dy/abs(dy)))))
             if next_unit_action is not None and (next_unit_action[0] == 0 and next_unit_action[1] in op_directions):
                 # would rather go somewhere else... i.e. any direction except the ones with a dist one with the opponent
-                options = sorted(all_deltas, key=lambda d: 1 if manhattan_dist_points(
-                    unit_pos + np.array(d), op_unit.pos) != 1 else 100)
+                score_fct = lambda d: 1 if manhattan_dist_points(unit_pos + np.array(d), op_unit.pos) != 1 else 100 + (
+                    50 if np.min(manh_dist_to_factory_vect_point(opponent_factory_tiles, unit_pos + np.array(d))) == 1
+                    else 0)
+                options = sorted(all_deltas, key=score_fct)
+                # options = sorted(all_deltas, key=lambda d: 1 if manhattan_dist_points(
+                #     unit_pos + np.array(d), op_unit.pos) != 1 else 100)
             else:
                 return None
         elif threat_dist > 2:
@@ -659,7 +693,7 @@ def go_resist2(unit, game_state, position_registry, op_unit, assigned_factory, t
             op_direction = direction_to(unit.pos, op_unit.pos)
             if chebyshev_dist_points(unit_pos, assigned_factory.pos) <= 1:
                 if next_unit_action is not None and (next_unit_action[0] == 0 and next_unit_action[1] == op_direction):
-                    # would rather go somewhere else than jumping to death
+                    # would rather go anywhere else than jumping to death
                     options = sorted(
                         all_deltas, key=lambda d: 10 if np.array_equal(unit_pos + np.array(d), op_unit.pos) else 1)
                 else:
@@ -782,6 +816,9 @@ def go_bully(unit, game_state, position_registry, assigned_factory, bullies_regi
 
     # flex proxy to assess if the unit is able to fight!
     proxy_end_game = max(game_state.real_env_steps - 900, 0) / 100
+
+    if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
+        pass
 
     inactive_pow_threshold = 0.2 * (1. - proxy_end_game) * unit_cfg.BATTERY_CAPACITY
     active_pow_threshold = 0.6 * (1. - proxy_end_game) * unit_cfg.BATTERY_CAPACITY

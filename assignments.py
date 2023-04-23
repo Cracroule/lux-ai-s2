@@ -64,7 +64,7 @@ def get_ideal_assignment_queue(factory, game_state, assigned_resources, factory_
     # for i in range(10):
     #     n_diggers += 1
     #     queue.extend([f"dig_rubble_{n_diggers}"])
-
+    # below might actually alter the optimal queue
     asngmt_tile_map = assign_tiles(factory, queue, sorted_ice_tiles, sorted_ore_tiles,
                                    max_distance_to_exploit_ore=max_distance_to_exploit_ore,
                                    max_distance_to_exploit_ice=max_distance_to_exploit_ice)
@@ -91,12 +91,16 @@ def assign_tiles(factory, queue, sorted_ice_tiles, sorted_ore_tiles, max_distanc
             else:
                 near_factory_tile_from_dig_spot = nearest_factory_tile(sorted_ore_tiles[n_allocated - 1], factory.pos)
             # todo: find a hack if a tile is meant to be used by two different assistants...
-            # below one should do, i.e. hack task
-            # if tuple(near_factory_tile_from_dig_spot) not in [tuple(t) for t in asngmt_tile_map.values()]:
-            #     asngmt_tile_map[asgnmt] = near_factory_tile_from_dig_spot
-            # else:
-            #     queue[:] = ["dig_rubble_100" if x == asgnmt else x for x in queue]
-            asngmt_tile_map[asgnmt] = near_factory_tile_from_dig_spot
+            #       below one should do, i.e. hack task
+            if tuple(near_factory_tile_from_dig_spot) not in \
+                    [tuple(t) for t in asngmt_tile_map.values() if t is not None]:
+                asngmt_tile_map[asgnmt] = near_factory_tile_from_dig_spot
+            else:
+                new_n = max([int(a.split('_')[-1]) for a in queue] + [1000]) + 1
+                new_asgnmt = f"dig_rubble_{new_n}"
+                queue[:] = [new_asgnmt if x == asgnmt else x for x in queue]
+                asngmt_tile_map[new_asgnmt] = None
+            # asngmt_tile_map[asgnmt] = near_factory_tile_from_dig_spot
         else:
             asngmt_tile_map[asgnmt] = None
 
@@ -126,10 +130,12 @@ def update_assignments(factory, factory_units, cur_units_assignments, ideal_queu
 
     nb_units = len(factory_units)
     nb_heavy = len([u_id for u_id, unit in factory_units.items() if unit.unit_type == "HEAVY"])
-    unassigned_units = [u_id for u_id in factory_units.keys() if u_id not in cur_units_assignments.keys()]
+    unassigned_units = [u_id for u_id in factory_units.keys() if u_id not in cur_units_assignments.keys() or
+                        cur_units_assignments[u_id] not in ideal_queue]
 
     # define sorted_u_id that contains all unit_ids sorted by reassignment priority
-    priorities_d = {u_id: ideal_queue.index(asgnmt) for u_id, asgnmt in cur_units_assignments.items()}
+    priorities_d = {u_id: ideal_queue.index(asgnmt) for u_id, asgnmt in cur_units_assignments.items()
+                    if u_id not in unassigned_units}
     u_id_by_desc_priority = sorted(list(priorities_d.keys()), key=lambda u_id: -priorities_d[u_id])
     sorted_u_id = unassigned_units + u_id_by_desc_priority
 
