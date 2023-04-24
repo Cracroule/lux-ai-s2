@@ -26,6 +26,8 @@ time_monitored_turns = []
 max_distance_to_exploit_ore = 10
 max_distance_to_exploit_ice = 5
 
+factory_regime_cycle = 35
+
 
 class Agent:
     def __init__(self, player: str, env_cfg: EnvConfig) -> None:
@@ -176,10 +178,12 @@ class Agent:
         """
 
         actions = dict()
+        init_bid = 20 if obs_to_game_state(step, self.env_cfg, obs).board.factories_per_team >= 2 else 10
+
         if step == 0:
             # Declare faction
             actions['faction'] = self.faction_names[self.player]
-            actions['bid'] = 10
+            actions['bid'] = init_bid
         else:
             # Factory placement period
             # optionally convert observations to python objects with utility functions
@@ -254,8 +258,29 @@ class Agent:
                 #                 actions['water']=water_left
                 # actions['metal'] = min(300, metal_left)
                 # actions['water'] = min(300, water_left)
-                actions["metal"] = min(int(1.0 * metal_left / factories_to_place), metal_left)
-                actions["water"] = min(int(1.0 * water_left / factories_to_place), water_left)
+                # actions["metal"] = min(int(1.0 * metal_left / factories_to_place), metal_left)
+                # actions["water"] = min(int(1.0 * water_left / factories_to_place), water_left)
+
+                # actions["metal"] = min(int(1.0 * metal_left / factories_to_place), metal_left)
+                # actions["water"] = min(int(1.0 * water_left / factories_to_place), water_left)
+
+                if init_bid > 0:
+                    missing_metal = 150 * factories_to_place - metal_left
+                    cost_p_f = 10
+                    n_impacted_factories = (missing_metal // cost_p_f) + (1 if (missing_metal % cost_p_f) else 0)
+                    if n_impacted_factories > factories_to_place:
+                        cost_p_f = 20
+                        n_impacted_factories = int((missing_metal // cost_p_f) + 1 if (missing_metal % cost_p_f) else 0)
+                    invest_res = 150 -(cost_p_f if factories_to_place-1 in list(range(n_impacted_factories)) else 0)
+                else:
+                    invest_res = 150
+
+                if factories_to_place != 1:
+                    actions['metal'] = min(invest_res, metal_left)
+                    actions['water'] = min(invest_res, water_left)
+                else:
+                    actions['metal'] = metal_left
+                    actions['water'] = water_left
 
                 # actions["metal"] = min(max(min(metal_left - 100 * factories_to_place, 200), 100), metal_left)
                 # actions["water"] = min(int(1.1 * water_left / factories_to_place), water_left)
@@ -338,7 +363,7 @@ class Agent:
                              if u_id in self.map_unit_factory.keys() and self.map_unit_factory[u_id] == factory_id}
             fact_units_assignments = {u_id: asgnmt for u_id, asgnmt in self.robots_assignments.items()
                                       if u_id in factory_units.keys()}
-            if (cur_turn % 25) == 0 or not len(self.factory_regimes):
+            if (cur_turn % factory_regime_cycle) == 0 or not len(self.factory_regimes):
                 self.factory_regimes[factory_id] = decide_factory_regime(
                     factory, game_state, factory_units, self.factory_resources_map,
                     max_distance_to_exploit_ore=max_distance_to_exploit_ore,

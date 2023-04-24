@@ -16,7 +16,7 @@ tmp_file = "tmp.txt"
 main_file1 = "/home/raoul/Code/lux-ai-s2/best_ai/main.py"
 main_file2 = "main.py"
 nb_of_games = 30
-base_seed = 78678678 + 22 + 50 + 50
+base_seed = 78678678 + 22 + 100 + 100
 
 games_stats = defaultdict(int)
 
@@ -44,7 +44,7 @@ for game_i in range(1, nb_of_games + 1):
         games_stats["player_0"] += 1
     else:
         games_stats["draw"] += 1
-    print(game_i, "(r)", game_outcome, games_stats)
+    print(game_i, "(r)", game_outcome, {**games_stats})
 
 print(games_stats)
 # os.system(f"rm {tmp_file}")
