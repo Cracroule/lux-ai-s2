@@ -16,7 +16,7 @@ tmp_file = "tmp.txt"
 main_file1 = "/home/raoul/Code/lux-ai-s2/best_ai/main.py"
 main_file2 = "main.py"
 nb_of_games = 30
-base_seed = 78678678 + 22 + 100 + 100
+base_seed = 78678678 + 22 + 100 + 100 + 100 + 20 + 20
 
 games_stats = defaultdict(int)
 
@@ -34,7 +34,7 @@ for game_i in range(1, nb_of_games + 1):
         games_stats["player_1"] += 1
     else:
         games_stats["draw"] += 1
-    print(game_i, game_outcome, games_stats)
+    print(game_i, game_outcome, {**games_stats})
 
     os.system(f"luxai-s2 {main_file2} {main_file1} > {tmp_file} -v 3 -s {seed}")
     game_outcome = parse_game_outcome(tmp_file)
