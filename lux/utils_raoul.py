@@ -125,29 +125,50 @@ def nearest_factory_tile(pos, fact_pos, excluded_tiles=None):
     return np.array(sorted(distances.keys(), key=lambda t: distances[t])[0])
 
 
-def weighted_rubble_adjacent_density(rubble_board, loc, max_d=7):
-    board_size = 48
+def weighted_rubble_adjacent_density(game_state, loc, max_d=7):
     weights, rubbles = list(), list()
-    for x_i in range(max(loc[0] - max_d, 0), min(loc[0] + max_d, board_size)):
-        for x_j in range(max(loc[1] - max_d, 0), min(loc[1] + max_d, board_size)):
-            if np.abs(x_i - loc[0]) <= 1 and np.abs(x_j - loc[1]) <= 1:
-                continue  # within potential factory location, we skip
-            dist = manhattan_dist_points(np.array([x_i, x_j]), loc)
-            if dist <= max_d:
-                weights.append(max_d + 1 - dist)  # the further, the least important
-                rubbles.append(rubble_board[x_i, x_j])
+
+    obs_n = max_d
+    for dx, dy in [(dx, dy) for dx in range(-7, obs_n + 1) for dy in range(-obs_n + abs(dx), obs_n - abs(dx) + 1)]:
+        if abs(dx) <= 1 and abs(dy) <= 1:
+            continue
+        x, y = loc[0] + dx, loc[1] + dy
+        if x < 0 or x >= 48 or y < 0 or y >= 48 or game_state.board.factory_occupancy_map[x, y] >= 0 or \
+                game_state.board.ice[x, y] or game_state.board.ore[x, y]:
+            rubble = 100  # all stuff that prevents lichen to grow...
+        else:
+            rubble = game_state.board.rubble[x, y]
+
+        dist = manhattan_dist_points(np.array([x, y]), loc)
+        weights.append(max_d + 1 - dist)  # the further, the least important
+        rubbles.append(rubble)
+
     return np.average(rubbles, weights=weights)
+    #
+    # for x_i in range(max(loc[0] - max_d, 0), min(loc[0] + max_d, board_size)):
+    #     for x_j in range(max(loc[1] - max_d, 0), min(loc[1] + max_d, board_size)):
+    #         if np.abs(x_i - loc[0]) <= 1 and np.abs(x_j - loc[1]) <= 1:
+    #             continue  # within potential factory location, we skip
+    #
+    #         rubble = game_state.board.rubble[x_i, x_j]
+    #         if game_state.board.factory_occupancy_map[x_i, x_j] != -1:
+    #             rubble = 100  # not a good tile, factory is there, lichen won't grow
+    #
+    #         # if f.pos for f in game_state.factories["player_0"]
+    #
+    #         dist = manhattan_dist_points(np.array([x_i, x_j]), loc)
+    #         if dist <= max_d:
+    #             weights.append(max_d + 1 - dist)  # the further, the least important
+    #             rubbles.append(rubble)
+    # return np.average(rubbles, weights=weights)
 
 
 # todo: could be done better, i.e. favoring adjacent areas nearby existing lichen or already dug tiles
 # todo: also could optimise perfs doing a base scoring only once per turn per factory, and adding the
 #       proximity penalty when sorting positions (in the key arg).
-def score_rubble_tiles_to_dig(game_state, associated_factory, obs_n=10, distance_penalty_factor=30):
-
-    # if include_proximity_penalty and unit_pos is None:
-    #     raise NotImplementedError("Error in score_rubble_tiles_to_dig: if include_proximity_penalty "
-    #                               "then non null unit_pos should be provided")
-
+def score_rubble_tiles_to_dig(game_state, associated_factory, obs_n, op_player, allow_lichen=True,
+                              distance_penalty_factor=30):
+    op_strain_ids = [f.strain_id for f in game_state.factories[op_player].values()]
     tiles_scores = dict()
     for dx, dy in [(dx, dy) for dx in range(-obs_n, obs_n+1) for dy in range(-obs_n+abs(dx), obs_n-abs(dx)+1)]:
         if abs(dx) <= 1 and abs(dy) <= 1:
@@ -160,7 +181,13 @@ def score_rubble_tiles_to_dig(game_state, associated_factory, obs_n=10, distance
         if game_state.board.ice[x, y] or game_state.board.ore[x, y]:
             continue
         rubble = game_state.board.rubble[x, y]
-        if not rubble:
+
+        if not allow_lichen and not rubble:
+            continue
+
+        # keep tile if it has lichen but does not change score... it will naturally be favored over rubble as no penalty
+        lichen_on_tile = game_state.board.lichen[x, y] if game_state.board.lichen_strains[x, y] in op_strain_ids else 0
+        if allow_lichen and not lichen_on_tile and not rubble:
             continue
 
         tile_score = distance_penalty_factor * (min(abs(dx - 1), 0) + min(abs(dy - 1), 0)) + rubble

@@ -393,9 +393,12 @@ def go_dig_resource(unit, game_state, position_registry, target_dug_tile, assign
 def go_dig_rubble(unit, game_state, position_registry, assigned_factory, factories_power, rubble_tiles_being_dug,
                   tiles_scores=None, n_min_digs=5, n_desired_digs=8):
 
+    player_me = "player_0" if unit.unit_id in game_state.units["player_0"].keys() else "player_1"
+    player_op = "player_1" if player_me == "player_0" else "player_0"
+
     obs_n_tiles = 10
     if tiles_scores is None:
-        tiles_scores = score_rubble_tiles_to_dig(game_state, assigned_factory, obs_n=obs_n_tiles)
+        tiles_scores = score_rubble_tiles_to_dig(game_state, assigned_factory, obs_n=obs_n_tiles, op_player=player_op)
 
     actions, actions_counter = list(), 0
     unit_cfg, init_turn = game_state.env_cfg.ROBOTS[unit.unit_type], game_state.real_env_steps
@@ -405,7 +408,7 @@ def go_dig_rubble(unit, game_state, position_registry, assigned_factory, factori
     tiles_scores = score_rubble_add_proximity_penalty_to_tiles_to_dig(tiles_scores, unit_pos)
     tiles_scores = {t: sc for t, sc in tiles_scores.items() if tuple(t) not in rubble_tiles_being_dug.values()}
     if not len(tiles_scores):
-        tiles_scores = score_rubble_tiles_to_dig(game_state, assigned_factory, obs_n=14)
+        tiles_scores = score_rubble_tiles_to_dig(game_state, assigned_factory, obs_n=obs_n_tiles+2, op_player=player_op)
         tiles_scores = score_rubble_add_proximity_penalty_to_tiles_to_dig(tiles_scores, unit_pos)
         tiles_scores = {t: sc for t, sc in tiles_scores.items() if tuple(t) not in rubble_tiles_being_dug.values()}
         if not len(tiles_scores):
@@ -845,7 +848,7 @@ def go_bully(unit, game_state, position_registry, assigned_factory, bullies_regi
                 break
 
     # weird flex proxy to assess if the unit is able to fight!
-    should_fight = unit_power >= (1000 - game_state.real_env_steps) * (unit_cfg.DIG_COST + unit_cfg.MOVE_COST) / 2.3
+    should_fight = unit_power >= (1000 - game_state.real_env_steps) * (unit_cfg.DIG_COST + unit_cfg.MOVE_COST) / 2.6
 
     if should_fight:
         lichen_attack_actions = attack_opponent_lichen(
@@ -1201,9 +1204,10 @@ def wander_n_turns(unit, game_state, position_registry, assigned_factory, n_wand
             break
 
         if not wander_option_found:  # commits suicide...
-            # todo: should obviously not suicide, but find best outcome based on other units around...
-            #       should be uncommon enough to be fine for now
-            actions.extend([unit.self_destruct()])
+            if unit.unit_type != "HEAVY":
+                # todo: should obviously not suicide, but find best outcome based on other units around...
+                #       should be uncommon enough to be fine for now
+                actions.extend([unit.self_destruct()])
 
     # if unit.unit_id in monitored_units and game_state.real_env_steps in monitored_turns:
     #     pass
@@ -1215,7 +1219,7 @@ def wander_n_turns(unit, game_state, position_registry, assigned_factory, n_wand
 
 
 def make_itinerary_advanced_old(unit, target_pos, game_state, position_registry, starting_turn=None, unit_pos=None,
-                            allow_approx=True, fct_stop_condition_tile=None, max_dist=20):
+                                allow_approx=True, fct_stop_condition_tile=None, max_dist=20):
 
     if starting_turn is None:  # assume it's a movement to be performed right now!
         starting_turn = game_state.real_env_steps

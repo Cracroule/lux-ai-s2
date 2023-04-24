@@ -13,14 +13,15 @@ def parse_game_outcome(game_full_log_file):
 
 
 tmp_file = "tmp.txt"
-main_file1 = "main2.py"
+main_file1 = "/home/raoul/Code/lux-ai-s2/best_ai/main.py"
 main_file2 = "main.py"
-nb_of_games = 100
+nb_of_games = 30
+base_seed = 78678678 + 22 + 50 + 50
 
 games_stats = defaultdict(int)
 
 for game_i in range(1, nb_of_games + 1):
-    seed = game_i
+    seed = game_i + base_seed
     os.system(f"luxai-s2 {main_file1} {main_file2} > {tmp_file} -v 3 -s {seed}")
     # res = os.system(f"luxai-s2 {main_file1} {main_file2} > {tmp_file} -v 3")
     # with open(tmp_file) as f:
@@ -34,6 +35,16 @@ for game_i in range(1, nb_of_games + 1):
     else:
         games_stats["draw"] += 1
     print(game_i, game_outcome, games_stats)
+
+    os.system(f"luxai-s2 {main_file2} {main_file1} > {tmp_file} -v 3 -s {seed}")
+    game_outcome = parse_game_outcome(tmp_file)
+    if game_outcome["player_0"] > game_outcome["player_1"]:
+        games_stats["player_1"] += 1
+    elif game_outcome["player_0"] < game_outcome["player_1"]:
+        games_stats["player_0"] += 1
+    else:
+        games_stats["draw"] += 1
+    print(game_i, "(r)", game_outcome, games_stats)
 
 print(games_stats)
 # os.system(f"rm {tmp_file}")

@@ -3,7 +3,7 @@ import numpy as np
 
 from lux.utils_raoul import chebyshev_dist_points, chebyshev_dist_vect_point, nearest_factory_tile, \
     manh_dist_to_factory_vect_point, manh_dist_to_factory_points, manhattan_dist_points, custom_dist_points, \
-    custom_dist_vect_point
+    custom_dist_vect_point, score_rubble_tiles_to_dig
 
 
 def get_ideal_assignment_queue(factory, game_state, assigned_resources, factory_regime,
@@ -14,6 +14,14 @@ def get_ideal_assignment_queue(factory, game_state, assigned_resources, factory_
 
     :return: ordered list of assignments
     """
+
+    player_me = "player_0" if factory.unit_id in game_state.units["player_0"].keys() else "player_1"
+    player_op = "player_1" if player_me == "player_0" else "player_0"
+    tiles_scores = score_rubble_tiles_to_dig(game_state, factory, obs_n=10, op_player=player_op, allow_lichen=False)
+    if not len(tiles_scores):
+        allow_dig_rubble = False
+    else:
+        allow_dig_rubble = True
 
     ice_tiles = np.array(assigned_resources["ice"][factory.unit_id])
     ore_tiles = np.array(assigned_resources["ore"][factory.unit_id])
@@ -53,9 +61,10 @@ def get_ideal_assignment_queue(factory, game_state, assigned_resources, factory_
                 n_exploited_ore += 1
                 queue.extend([f"ore_solo_{n_exploited_ore}"])
         elif instruction == "rubble":
-            for i in range(2):
-                n_diggers += 1
-                queue.extend([f"dig_rubble_{n_diggers}"])
+            if allow_dig_rubble:
+                for i in range(2):
+                    n_diggers += 1
+                    queue.extend([f"dig_rubble_{n_diggers}"])
 
     for i in range(30):  # then fight x10
         n_bullies += 1
@@ -108,7 +117,7 @@ def assign_tiles(factory, queue, sorted_ice_tiles, sorted_ore_tiles, max_distanc
 
 
 def update_assignments(factory, factory_units, cur_units_assignments, ideal_queue, heavy_reassign=True,
-                       allow_heavy_rubble=False):
+                       allow_heavy_rubble=False, lim_heavy_per_resource=2):
     """
     look at current assignments, ideal_assignments_queue and reorganise assignments such as it is fit-for-purpose.
 
@@ -153,6 +162,14 @@ def update_assignments(factory, factory_units, cur_units_assignments, ideal_queu
             if "_assist_" in asgnmt or ((not allow_heavy_rubble) and "dig_rubble" in asgnmt):
                 continue
 
+            if lim_heavy_per_resource is not None and asgnmt.startswith("ore_") and \
+                    int(asgnmt.split('_')[-1]) > lim_heavy_per_resource:
+                continue
+
+            if lim_heavy_per_resource is not None and asgnmt.startswith("water_") and \
+                    int(asgnmt.split('_')[-1]) > lim_heavy_per_resource:
+                continue
+
             i += 1
             if i > nb_heavy:
                 break
@@ -180,22 +197,43 @@ def update_assignments(factory, factory_units, cur_units_assignments, ideal_queu
             sorted_u_id.append(to_be_reassigned_id)  # put on right side  (not to be reassigned)
 
     # define (again!) sorted_u_id that contains all unit_ids sorted by reassignment priority
-    re_cur_units_assignments = dict(cur_units_assignments, **reassignments_d)
-    # priorities_d = {u_id: ideal_queue.index(asgnmt) for u_id, asgnmt in re_cur_units_assignments.items()}
-    # u_id_by_desc_priority = sorted(list(priorities_d.keys()), key=lambda u_id: -priorities_d[u_id])
-    # re_unassigned_units = [u_id for u_id in factory_units.keys() if u_id not in re_cur_units_assignments.keys()]
-    # sorted_u_id = re_unassigned_units + u_id_by_desc_priority
+    # re_cur_units_assignments = dict(cur_units_assignments, **reassignments_d)
+    re_cur_units_assignments = {**{u_id: asgnmt for u_id, asgnmt in cur_units_assignments.items()
+                                   if asgnmt not in reassignments_d.values()}, **reassignments_d}
+    re_unassigned_units = [u_id for u_id in factory_units.keys() if u_id not in re_cur_units_assignments.keys() or
+                           re_cur_units_assignments[u_id] not in ideal_queue]
+    priorities_d = {u_id: ideal_queue.index(asgnmt) for u_id, asgnmt in re_cur_units_assignments.items()
+                    if u_id not in re_unassigned_units}
+    u_id_by_desc_priority = sorted(list(priorities_d.keys()), key=lambda u_id: -priorities_d[u_id])
+    sorted_u_id = re_unassigned_units + u_id_by_desc_priority
 
     i = 0
     for asgnmt in ideal_queue:
+
+        if asgnmt in re_cur_units_assignments.values() and \
+                factory_units[[u_id for u_id, asgnmt_ in re_cur_units_assignments.items()
+                               if asgnmt_ == asgnmt][0]].unit_type == "HEAVY":
+            continue
+
         i += 1
-        if i > nb_units:
+        if i > nb_units - (nb_heavy if heavy_reassign else 0):
             break
+
         if asgnmt not in re_cur_units_assignments.values():
             # reassign unit with the smallest priority to something more important
-            to_be_reassigned_id = sorted_u_id[0]
-            if factory_units[to_be_reassigned_id].unit_type == "HEAVY":
-                break  # do not reassign an HEAVY one. We're done if that's the only option (only assist filling)
+
+            j = 0
+            if heavy_reassign:
+                while factory_units[sorted_u_id[j]].unit_type == "HEAVY" and j < nb_units:
+                    j += 1
+                if j == nb_units:
+                    break  # we're done with reassignment
+            to_be_reassigned_id = sorted_u_id[j]
+
+            # to_be_reassigned_id = sorted_u_id[0]
+            # if factory_units[to_be_reassigned_id].unit_type == "HEAVY":
+            #     break  # do not reassign an HEAVY one. We're done if that's the only option (only assist filling)
+
             reassignments_d[to_be_reassigned_id] = asgnmt
             sorted_u_id.remove(to_be_reassigned_id)  # remove from left side
             sorted_u_id.append(to_be_reassigned_id)  # put on right side  (not to be reassigned)
@@ -289,12 +327,41 @@ def decide_factory_regime(factory, game_state, factory_units, assigned_resources
     f_power, f_water, f_metal = factory.power, factory.cargo.water, factory.cargo.metal
     cur_turn = game_state.real_env_steps
 
+    # if f_water < 160:
+    #     regime = ["water", "rubble", "metal", "water", "rubble", "metal", "rubble", "rubble", "water", "rubble"]
+    # elif nb_units >= 3 and f_power < 600:
+        #     if f_metal < 400:
+        #         regime = ["water", "rubble", "metal", "water", "rubble", "metal"]
+        #     else:
+        #         regime = ["water", "rubble", "water", "rubble"]
+    # elif nb_units < 3:
+    #     if f_water > 300:
+    #         regime = ["metal", "water", "rubble", "metal", "water", "rubble"]
+    #     else:
+    #         regime = ["water", "metal", "rubble", "water", "metal", "rubble"]
+    # elif f_power > 1500:
+    #     regime = ["metal", "water", "rubble", "metal", "water", "rubble"]
+    # elif cur_turn < 900 and f_metal < 110:
+    #     regime = ["metal", "water", "metal", "water", "rubble", "rubble"]
+    # elif cur_turn < 900 and f_metal >= 110:
+    #     regime = ["water", "metal", "water", "metal", "rubble", "rubble"]
+    # else:  # no time to get metal anymore
+    #     regime = ["water", "water", "rubble", "rubble", "metal", "metal"]
+
     if f_water < 160:
         regime = ["water", "rubble", "metal", "water", "rubble", "metal"]
     elif nb_units >= 3 and f_power < 600:
-        regime = ["water", "rubble", "metal", "water", "rubble", "metal"]
+        # regime = ["water", "rubble", "metal", "water", "rubble", "metal"]
+        if f_metal < 400:
+            regime = ["water", "rubble", "metal", "water", "rubble", "metal"]
+        else:
+            regime = ["water", "rubble", "water", "rubble"]
     elif nb_units < 3:
-        regime = ["water", "metal", "rubble", "water", "metal", "rubble"]
+        # regime = ["water", "metal", "rubble", "water", "metal", "rubble"]
+        if f_water > 300:
+            regime = ["metal", "water", "rubble", "metal", "water", "rubble"]
+        else:
+            regime = ["water", "metal", "rubble", "water", "metal", "rubble"]
     elif f_power > 1500:
         regime = ["metal", "water", "rubble", "metal", "water", "rubble"]
     elif cur_turn < 900 and f_metal < 110:
@@ -304,6 +371,5 @@ def decide_factory_regime(factory, game_state, factory_units, assigned_resources
     else:  # no time to get metal anymore
         regime = ["water", "water", "rubble", "rubble", "metal", "metal"]
 
+    # return [*regime, "rubble", *regime]
     return [*regime, *regime]
-
-    # return ["water", "rubble", "water", "rubble", "water", "rubble", "water", "rubble"]
